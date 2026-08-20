@@ -1560,9 +1560,30 @@ private void setRouteMode(RouteMode mode) {
         nodeScanRunning=true; beginScanAction(action); status.setVisibility(View.VISIBLE); status.setTextColor(p.muted); status.setText("正在准备节点测速…");
         String scanToken=token;
         io.execute(()->{
-            List<NodeProbeResult> results=probeNodes(nodes,2200,(result,completed,total)->runOnUiThread(()->{
+            List<NodeCatalog.Node> probeTargets=new ArrayList<>(nodes);
+            List<NodeProbeResult> results=new ArrayList<>();
+            CoreState.Snapshot connectedState=CoreState.read(this);
+            if(connectedState.state==CoreState.RUNNING){
+                NodeCatalog.Node connected=catalog.find(connectedState.nodeId);
+                VpnCoreService.TunnelHealth health=VpnCoreService.checkTunnelHealthNow();
+                if(connected!=null&&health.healthy){
+                    results.add(NodeProbeResult.success(connected,health.latencyMs));
+                    probeTargets.removeIf(candidate->candidate.id==connected.id);
+                    runOnUiThread(()->{
+                        if(!dialog.isShowing())return;
+                        TextView badge=latencyBadges.get(connected.id);
+                        if(badge!=null){
+                            badge.setText(health.latencyMs+" ms");
+                            badge.setTextColor(latencyColor(health.latencyMs));
+                            popResult(badge);
+                        }
+                        status.setText("已完成 1 / "+nodes.size()+" · "+connected.name+"（当前隧道正常）");
+                    });
+                }
+            }
+            results.addAll(probeNodes(probeTargets,2200,(result,completed,total)->runOnUiThread(()->{
                 if(!dialog.isShowing())return;
-                status.setText("已完成 "+completed+" / "+total+" · "+result.node.name);
+                status.setText("已完成 "+(completed+1)+" / "+nodes.size()+" · "+result.node.name);
                 TextView badge=latencyBadges.get(result.node.id);
                 if(badge!=null){
                     badge.setText(result.error==null?result.latencyMs+" ms":probeFailureLabel(result.error));
