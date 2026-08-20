@@ -49,6 +49,7 @@ public final class SingBoxConfigBuilderTest {
 
     @Test public void stableReleaseWinsOverMatchingPrerelease() {
         assertTrue(AppUpdateChecker.compareVersions("1.0.0", "1.0.0-rc1") > 0);
+        assertTrue(AppUpdateChecker.compareVersions("1.0.0", "1.0.0-rc2") > 0);
         assertTrue(AppUpdateChecker.compareVersions("1.0.0-rc2", "1.0.0-rc") > 0);
         assertTrue(AppUpdateChecker.compareVersions("1.0.1", "1.0.0") > 0);
         assertEquals(0, AppUpdateChecker.compareVersions("v1.0.0", "1.0.0"));

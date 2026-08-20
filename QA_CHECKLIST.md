@@ -1,9 +1,9 @@
-# XVPN Android v1.0.0-rc2 测试清单
+# XVPN Android v1.0.0 测试清单
 
 ## 源码与构建门槛
 
 - [x] Application ID = `com.xvpn.android`
-- [x] `versionName = 1.0.0-rc2`，`versionCode = 10019`
+- [x] `versionName = 1.0.0`，`versionCode = 10020`
 - [x] 仅打包 `arm64-v8a/libbox.so`，libbox 版本固定为 1.13.19
 - [x] libbox AAR 与两份本地 SRS 规则均有固定 SHA-256，GitHub Actions 会在编译前核对
 - [x] 每次首次连接和已连接热切换都会先执行 libbox `checkConfig`
@@ -14,15 +14,15 @@
 - [ ] GitHub APK 通过包名 / 版本、zipalign、APK Signature Scheme v2、单 DEX、规则资产与 `arm64-v8a` ABI 结构检查
 - [ ] GitHub APK 的固定证书摘要检查通过
 
-> 真机安装包必须由仓库固定 Release 签名工作流生成；不要使用旧 RC1 的本地 APK 代替本次构建。
+> 真机安装包必须由仓库固定 Release 签名工作流生成；不要使用旧 RC2 的本地 APK 代替本次构建。
 
 ## 安装、浅色与深色
 
 - [ ] GitHub Actions `Build XVPN Android` 完整成功
-- [ ] `XVPN-v1.0.0-rc2.apk` 证书 SHA-256 与 `SIGNING_CERT_SHA256.txt` 一致
+- [ ] `XVPN-v1.0.0.apk` 证书 SHA-256 与 `SIGNING_CERT_SHA256.txt` 一致
 - [ ] “延迟测试网站”可保存裸域名、HTTP 或 HTTPS 地址；保存后返回设置页显示新域名，重启 App 后仍保留；无效地址明确提示且不改写旧值
-- [ ] 可从 RC1 覆盖安装，登录、主题、已选节点与分流偏好保留
-- [x] RC2 以 `https://xvpn.666101.xyz` 建立新的内置地址基线；后续内置地址迁移不会改写自定义 Panel 地址
+- [ ] 可从 RC2 覆盖安装，登录、主题、已选节点与分流偏好保留
+- [x] 1.0.0 以 `https://xvpn.666101.xyz` 建立新的内置地址基线；后续内置地址迁移不会改写自定义 Panel 地址
 - [ ] 已连接状态点击“自动优选”：逐个真实切换并验证候选节点，失败节点自动回退，最终保留最低实际延迟节点
 - [ ] 首次连接：一次快速真实隧道验证后进入已连接状态，不重复执行慢检
 - [ ] 浅色 Launcher 图标尺寸和呼吸区正确，无深蓝底

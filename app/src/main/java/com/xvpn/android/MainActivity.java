@@ -172,7 +172,7 @@ public final class MainActivity extends android.app.Activity {
     }
 
     /**
-     * Establishes 1.0.0-rc2 as the first managed built-in Panel endpoint.
+     * Establishes 1.0.0 as the first managed built-in Panel endpoint.
      * Builds before this marker deliberately start from the current endpoint;
      * after that, only users who keep the built-in address are migrated when
      * the compiled default changes. A user-entered Panel is never overwritten.
