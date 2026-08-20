@@ -47,6 +47,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           grep -q "applicationId 'com.xvpn.android'" app/build.gradle
 
           VERSION_CODE="$(sed -nE 's/^[[:space:]]*versionCode[[:space:]]+([0-9]+).*/\1/p' app/build.gradle | head -n1)"
@@ -69,23 +70,30 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           AAR="app/libs/libbox-1.13.19-arm64.aar"
           test -f "$AAR"
 
-          printf '%s  %s\n' \
-            '9b73fc5fb5591e9b0f269ae04685daa9ece38e954524bf642f8140fa769ca8' \
-            "$AAR" | sha256sum --check --strict
+          EXPECTED_AAR_SHA="9b73fc5fb5591e9b0f269ae04685daa9ece38e95452454bf642f8140fa769ca8"
+          ACTUAL_AAR_SHA="$(sha256sum "$AAR" | awk '{print $1}')"
+          test "$ACTUAL_AAR_SHA" = "$EXPECTED_AAR_SHA"
 
-          CORE_SHA="$(unzip -p "$AAR" jni/arm64-v8a/libbox.so | sha256sum | cut -d' ' -f1)"
-          test "$CORE_SHA" = 'a54962a1ecc2f3d6b2311903dc80993d7aa7f5327d5bbb06a61899e420326aaa'
+          CORE_SHA="$(unzip -p "$AAR" jni/arm64-v8a/libbox.so | sha256sum | awk '{print $1}')"
+          test "$CORE_SHA" = "a54962a1ecc2f3d6b2311903dc80993d7aa7f5327d5bbb06a61899e420326aaa"
 
-          printf '%s  %s\n' \
-            '9cccc08ff669d707d7662ed78cc0a3b2626c4f16a6d151a9167dadb44d3da7b8' \
-            'app/src/main/assets/rules/geosite-geolocation-cn.srs' | sha256sum --check --strict
+          GEO_SITE_SHA="9cccc08ff669d707d7662ed78cc0a3b2626c4f16a6d151a9167dadb44d3da7b8"
+          GEO_IP_SHA="0acf5dad38fba9db2dade29ce5e4edc6902220944f30628ae46ed16cb0ec5edd"
 
-          printf '%s  %s\n' \
-            '0acf5dad38fba9db2dade29ce5e4edc6902220944f30628ae46ed16cb0ec5edd' \
-            'app/src/main/assets/rules/geoip-cn.srs' | sha256sum --check --strict
+          test "$(sha256sum app/src/main/assets/rules/geosite-geolocation-cn.srs | awk '{print $1}')" = "$GEO_SITE_SHA"
+          test "$(sha256sum app/src/main/assets/rules/geoip-cn.srs | awk '{print $1}')" = "$GEO_IP_SHA"
+
+          BINDINGS_JAR="${RUNNER_TEMP}/libbox-classes.jar"
+          unzip -p "$AAR" classes.jar > "$BINDINGS_JAR"
+
+          if unzip -Z1 "$BINDINGS_JAR" | grep -Fx 'go/libbox/gojni/R.class' >/dev/null; then
+            echo "Invalid bundled bindings"
+            exit 1
+          fi
 
       - name: Restore permanent release signing key
         shell: bash
@@ -134,7 +142,7 @@ jobs:
 
           SIGNATURE_OUTPUT="$("$APKSIGNER" verify --verbose --print-certs "$APK")"
           printf '%s\n' "$SIGNATURE_OUTPUT"
-          printf '%s\n' "$SIGNATURE_OUTPUT" | grep -F 'Verified using v2 scheme (APK Signature Scheme v2): true'
+          printf '%s\n' "$SIGNATURE_OUTPUT" | grep -F "Verified using v2 scheme (APK Signature Scheme v2): true"
 
           BADGING="$("$AAPT" dump badging "$APK")"
           printf '%s\n' "$BADGING"
@@ -147,15 +155,18 @@ jobs:
           EXPECTED_CERT="$(tr -d ':[:space:]' < SIGNING_CERT_SHA256.txt | tr 'A-F' 'a-f')"
           ACTUAL_CERT="$(printf '%s\n' "$SIGNATURE_OUTPUT" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n1 | tr -d ':[:space:]' | tr 'A-F' 'a-f')"
 
+          test -n "$ACTUAL_CERT"
           test "$ACTUAL_CERT" = "$EXPECTED_CERT"
 
       - name: Prepare artifact
         shell: bash
         run: |
           set -euo pipefail
+
           mkdir -p dist
           APK_NAME="XVPN-v${VERSION_NAME}.apk"
           cp app/build/outputs/apk/release/app-release.apk "dist/${APK_NAME}"
+
           cd dist
           sha256sum "$APK_NAME" > SHA256SUMS.txt
 
