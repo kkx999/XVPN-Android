@@ -20,8 +20,8 @@ android {
         applicationId 'com.xvpn.android'
         minSdk 26
         targetSdk 36
-        versionCode 10023
-        versionName '1.0.0-rc6'
+        versionCode 10100
+        versionName '1.1.0'
         // The user-selectable latency target supports Apple's HTTP success
         // page. Panel API validation remains HTTPS-only in release builds.
         manifestPlaceholders = [usesCleartextTraffic: 'true']
