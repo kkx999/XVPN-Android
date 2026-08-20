@@ -497,7 +497,10 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
      * routing, the selected protocol and the remote egress together.
      */
     private TunnelHealth waitForInitialTunnelHealth() {
-        return waitForTunnelHealth(defaultHealthTargets(), 1);
+        // A fresh TUN and its DNS dispatcher can need a short warm-up on some
+        // Android carrier networks. The second attempt runs only after a real
+        // first failure, so the normal successful connection path stays fast.
+        return waitForTunnelHealth(defaultHealthTargets(), 2);
     }
 
     private TunnelHealth waitForTunnelHealth() {
@@ -731,6 +734,11 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
         if (listener == null) return;
         try {
             Network network = physicalNetwork();
+            // Keep Android's VPN transport hint aligned with sing-box's
+            // selected interface after Wi-Fi/cellular handover. Without this,
+            // Android may continue treating a disconnected network as the
+            // tunnel's underlying transport even though Core has moved on.
+            setUnderlyingNetworks(network == null ? null : new Network[]{network});
             LinkProperties link = network == null ? null : connectivity.getLinkProperties(network);
             if (link == null || link.getInterfaceName() == null) {
                 listener.updateDefaultInterface("", -1, false, false);

@@ -49,8 +49,7 @@ public final class SingBoxConfigBuilderTest {
 
     @Test public void stableReleaseWinsOverMatchingPrerelease() {
         assertTrue(AppUpdateChecker.compareVersions("1.0.0", "1.0.0-rc1") > 0);
-        assertTrue(AppUpdateChecker.compareVersions("1.0.0", "1.0.0-rc2") > 0);
-        assertTrue(AppUpdateChecker.compareVersions("1.0.0-rc2", "1.0.0-rc") > 0);
+        assertTrue(AppUpdateChecker.compareVersions("1.0.0-rc3", "1.0.0-rc2") > 0);
         assertTrue(AppUpdateChecker.compareVersions("1.0.1", "1.0.0") > 0);
         assertEquals(0, AppUpdateChecker.compareVersions("v1.0.0", "1.0.0"));
     }
@@ -60,6 +59,22 @@ public final class SingBoxConfigBuilderTest {
                 ApiClient.safeServerMessage(500, "<!doctype html><html><body>internal error</body></html>"));
         assertEquals("接口地址不存在，请检查 Panel 配置", ApiClient.safeServerMessage(404, ""));
         assertEquals("账户被暂停", ApiClient.safeServerMessage(400, "账户被暂停"));
+    }
+
+    @Test public void savedLatencyHostAlwaysUsesProxyAndSecureDns() throws Exception {
+        NodeCatalog.Node node = new NodeCatalog.Node();
+        node.id = 1;
+        node.name = "VLESS";
+        node.protocol = "vless";
+        node.config = "vless://" + UUID
+                + "@example.com:443?security=tls&sni=example.com&type=ws&host=example.com&path=%2Fws";
+        JSONObject root = SingBoxConfigBuilder.build(node, RouteMode.SMART, RULES, "www.apple.com");
+        JSONObject dnsRule = findDomainRule(root.getJSONObject("dns").getJSONArray("rules"), "www.apple.com");
+        JSONObject routeRule = findDomainRule(root.getJSONObject("route").getJSONArray("rules"), "www.apple.com");
+        assertNotNull(dnsRule);
+        assertNotNull(routeRule);
+        assertEquals("secure-dns", dnsRule.getString("server"));
+        assertEquals("proxy", routeRule.getString("outbound"));
     }
 
     private static void assertBaseNetworkProfile(JSONObject root) throws Exception {
@@ -74,8 +89,14 @@ public final class SingBoxConfigBuilderTest {
         assertEquals("ipv4_only", dns.getString("strategy"));
         JSONArray servers = dns.getJSONArray("servers");
         assertEquals("local-dns", servers.getJSONObject(0).getString("tag"));
+        assertEquals("udp", servers.getJSONObject(0).getString("type"));
+        assertEquals("223.5.5.5", servers.getJSONObject(0).getString("server"));
         assertFalse(servers.getJSONObject(0).has("detour"));
+        assertFalse(servers.getJSONObject(0).has("tls"));
+        assertEquals("https", servers.getJSONObject(1).getString("type"));
+        assertEquals("1.1.1.1", servers.getJSONObject(1).getString("server"));
         assertEquals("proxy", servers.getJSONObject(1).getString("detour"));
+        assertEquals("local-dns", root.getJSONObject("route").getString("default_domain_resolver"));
 
         JSONObject quicReject = findRule(root.getJSONObject("route").getJSONArray("rules"),
                 "network", "udp");
@@ -103,6 +124,17 @@ public final class SingBoxConfigBuilderTest {
         for (int i = 0; i < rules.length(); i++) {
             JSONObject rule = rules.getJSONObject(i);
             if (value.equals(rule.optString(key))) return rule;
+        }
+        return null;
+    }
+
+    private static JSONObject findDomainRule(JSONArray rules, String domain) throws Exception {
+        for (int i = 0; i < rules.length(); i++) {
+            JSONArray values = rules.getJSONObject(i).optJSONArray("domain");
+            if (values == null) continue;
+            for (int j = 0; j < values.length(); j++) {
+                if (domain.equals(values.getString(j))) return rules.getJSONObject(i);
+            }
         }
         return null;
     }

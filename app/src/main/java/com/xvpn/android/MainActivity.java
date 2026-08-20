@@ -172,7 +172,7 @@ public final class MainActivity extends android.app.Activity {
     }
 
     /**
-     * Establishes 1.0.0 as the first managed built-in Panel endpoint.
+     * Establishes 1.0.0-rc2 as the first managed built-in Panel endpoint.
      * Builds before this marker deliberately start from the current endpoint;
      * after that, only users who keep the built-in address are migrated when
      * the compiled default changes. A user-entered Panel is never overwritten.
@@ -1283,7 +1283,9 @@ private void setRouteMode(RouteMode mode) {
         LinearLayout info=column(); info.setPadding(dp(15),dp(13),dp(15),dp(13)); info.setBackground(roundRect(p.surfaceAlt,18,0,0));
         info.addView(detailLine("协议",node.protocol.isEmpty()?"—":node.protocol.toUpperCase(Locale.ROOT)),matchWrap());
         info.addView(divider());
-        info.addView(detailLine("节点延迟",isUdpOnlyNode(node)?"UDP 节点需连接后实测":"测试节点入口 TCP 握手"),matchWrap());
+        boolean activeTunnelNode=isCurrentTunnelNode(node);
+        String latencyHint=activeTunnelNode?"测试当前 VPN 隧道":isUdpOnlyNode(node)?"UDP 节点需连接后实测":"测试节点入口 TCP 握手";
+        info.addView(detailLine("节点延迟",latencyHint),matchWrap());
         sheet.addView(info,matchWrap());
         gap(sheet,14);
 
@@ -1300,7 +1302,7 @@ private void setRouteMode(RouteMode mode) {
         sheet.addView(actions,matchWrap());
 
         test.setOnClickListener(v->{
-            test.setEnabled(false); test.setText("测速中…"); result.setText("正在连接节点入口…"); result.setTextColor(p.muted);
+            test.setEnabled(false); test.setText("测速中…"); result.setText(connectedHere?"正在测试当前 VPN 隧道…":"正在连接节点入口…"); result.setTextColor(p.muted);
             io.execute(()->{
                 try{
                     long ms=measureNodeLatency(node);
@@ -1343,14 +1345,20 @@ private void setRouteMode(RouteMode mode) {
         return "hysteria2".equals(protocol)||"hy2".equals(protocol)||"tuic".equals(protocol);
     }
 
+    private boolean isCurrentTunnelNode(NodeCatalog.Node node){
+        CoreState.Snapshot core=CoreState.read(this);
+        return node!=null&&core.state==CoreState.RUNNING&&core.nodeId==node.id;
+    }
+
     private void testSelectedNodeQuick(TextView badge) {
         NodeCatalog.Node node=selectedNode; if(node==null){toast("当前没有可用节点");return;}
+        if(CoreState.read(this).isBusy()){toast("当前配置正在切换，请稍候…");return;}
         badge.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK); badge.setEnabled(false); badge.setText("测速中");
         io.execute(()->{
             try{
                 long ms=measureNodeLatency(node); prefs.edit().putLong("node_latency_"+node.id,ms).apply();
-                runOnUiThread(()->{badge.setEnabled(true);badge.setText(ms+" ms");badge.setTextColor(latencyColor(ms));});
-            }catch(Exception e){runOnUiThread(()->{badge.setEnabled(true);badge.setText(probeFailureLabel(e));badge.setTextColor(e instanceof UdpProbeUnavailableException?p.warningText:p.danger);});}
+                runOnUiThread(()->{if(!badge.isAttachedToWindow())return;badge.setEnabled(true);badge.setText(ms+" ms");badge.setTextColor(latencyColor(ms));});
+            }catch(Exception e){runOnUiThread(()->{if(!badge.isAttachedToWindow())return;badge.setEnabled(true);badge.setText(probeFailureLabel(e));badge.setTextColor(e instanceof UdpProbeUnavailableException?p.warningText:p.danger);});}
         });
     }
 
@@ -1397,10 +1405,15 @@ private void setRouteMode(RouteMode mode) {
     private long measureNodeLatency(NodeCatalog.Node node) throws Exception { return measureNodeLatency(node,3000); }
 
     private long measureNodeLatency(NodeCatalog.Node node,int timeoutMs) throws Exception {
+        if(isCurrentTunnelNode(node)){
+            VpnCoreService.TunnelHealth health=VpnCoreService.checkTunnelHealthNow(latencyTestUrl());
+            if(health.healthy)return health.latencyMs;
+            String error=health.error==null?"":health.error;
+            String label=error.contains("DNS")?"DNS失败":error.contains("超时")?"超时":"测试失败";
+            throw new NodeProbeException(label,null);
+        }
         SingBoxConfigBuilder.Endpoint endpoint=SingBoxConfigBuilder.endpoint(node);
         if(!endpoint.tcpProbeSupported){
-            CoreState.Snapshot core=CoreState.read(this);
-            if(core.state==CoreState.RUNNING&&core.nodeId==node.id)return measureHttpLatency(latencyTestUrl());
             throw new UdpProbeUnavailableException();
         }
         long start=System.nanoTime();

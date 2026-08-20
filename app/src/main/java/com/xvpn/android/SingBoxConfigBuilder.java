@@ -6,6 +6,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.net.URLDecoder;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Base64;
@@ -18,17 +19,26 @@ import java.util.Set;
 /** Builds the validated sing-box 1.13 profile consumed by {@link VpnCoreService}. */
 final class SingBoxConfigBuilder {
     static final int TUN_MTU = 1400;
-    static final String NETWORK_PROFILE = "IPv4 · MTU 1400 · 加密 DNS";
+    static final String NETWORK_PROFILE = "IPv4 · MTU 1400 · 分流 DNS";
+    private static final String APP_PREFS = "xvpn_preferences_v1";
+    private static final String DEFAULT_LATENCY_URL = "http://www.apple.com/library/test/success.html";
     private static final Set<String> SUPPORTED_TYPES = new HashSet<>(Arrays.asList(
             "vless", "trojan", "vmess", "shadowsocks", "hysteria2", "tuic", "anytls"));
 
     private SingBoxConfigBuilder() {}
 
     static JSONObject build(Context context, NodeCatalog.Node node, RouteMode mode) throws Exception {
-        return build(node, mode, RuleSetInstaller.ensureInstalled(context));
+        String target = context.getSharedPreferences(APP_PREFS, Context.MODE_PRIVATE)
+                .getString("latency_test_url", DEFAULT_LATENCY_URL);
+        return build(node, mode, RuleSetInstaller.ensureInstalled(context), latencyProbeHost(target));
     }
 
     static JSONObject build(NodeCatalog.Node node, RouteMode mode, RuleSetInstaller.Paths rulePaths) throws Exception {
+        return build(node, mode, rulePaths, "");
+    }
+
+    static JSONObject build(NodeCatalog.Node node, RouteMode mode, RuleSetInstaller.Paths rulePaths,
+                            String latencyProbeHost) throws Exception {
         if (node == null || node.config == null || node.config.trim().isEmpty()) {
             throw new IllegalArgumentException("节点配置为空");
         }
@@ -37,7 +47,7 @@ final class SingBoxConfigBuilder {
 
         JSONObject root = new JSONObject();
         root.put("log", new JSONObject().put("level", "warn").put("timestamp", true));
-        root.put("dns", buildDns(mode));
+        root.put("dns", buildDns(mode, latencyProbeHost));
 
         JSONObject tun = new JSONObject()
                 .put("type", "tun")
@@ -56,7 +66,7 @@ final class SingBoxConfigBuilder {
                 .put(proxy)
                 .put(new JSONObject().put("type", "direct").put("tag", "direct"))
                 .put(new JSONObject().put("type", "block").put("tag", "block")));
-        root.put("route", buildRoute(mode, rulePaths));
+        root.put("route", buildRoute(mode, rulePaths, latencyProbeHost));
         root.put("experimental", new JSONObject()
                 .put("cache_file", new JSONObject().put("enabled", true).put("store_rdrc", true)));
         return root;
@@ -318,24 +328,20 @@ final class SingBoxConfigBuilder {
                 .put("server_port", uri.port);
     }
 
-    private static JSONObject buildDns(RouteMode mode) throws Exception {
-        JSONObject localTls = new JSONObject().put("enabled", true).put("server_name", "dns.alidns.com");
-        JSONObject secureTls = new JSONObject().put("enabled", true).put("server_name", "dns.google");
+    private static JSONObject buildDns(RouteMode mode, String latencyProbeHost) throws Exception {
+        JSONObject secureTls = new JSONObject().put("enabled", true).put("server_name", "cloudflare-dns.com");
         JSONArray servers = new JSONArray()
                 .put(new JSONObject()
-                        .put("type", "https")
+                        // Keep node/bootstrap and direct-domain resolution free
+                        // of proxy/DoH dependency loops. This matches the stable
+                        // split used by mainstream Android proxy clients.
+                        .put("type", "udp")
                         .put("tag", "local-dns")
-                        .put("server", "223.5.5.5")
-                        .put("server_port", 443)
-                        .put("path", "/dns-query")
-                        // New-style DoH servers dial directly when detour is absent.
-                        // Pointing this at an otherwise empty direct outbound is
-                        // rejected by sing-box 1.13 as a meaningless detour.
-                        .put("tls", localTls))
+                        .put("server", "223.5.5.5"))
                 .put(new JSONObject()
                         .put("type", "https")
                         .put("tag", "secure-dns")
-                        .put("server", "8.8.8.8")
+                        .put("server", "1.1.1.1")
                         .put("server_port", 443)
                         .put("path", "/dns-query")
                         .put("tls", secureTls)
@@ -351,6 +357,14 @@ final class SingBoxConfigBuilder {
                 .put("domain_suffix", new JSONArray().put("lan").put("local"))
                 .put("action", "route")
                 .put("server", "local-dns"));
+        if (!latencyProbeHost.isEmpty()) {
+            // The user-selected latency site must exercise the proxy even when
+            // its CDN address would otherwise match a China direct rule.
+            rules.put(new JSONObject()
+                    .put("domain", new JSONArray().put(latencyProbeHost))
+                    .put("action", "route")
+                    .put("server", "secure-dns"));
+        }
         if (mode == RouteMode.SMART) {
             rules.put(new JSONObject()
                     .put("rule_set", new JSONArray().put("geosite-cn"))
@@ -365,7 +379,8 @@ final class SingBoxConfigBuilder {
         return dns;
     }
 
-    private static JSONObject buildRoute(RouteMode mode, RuleSetInstaller.Paths paths) throws Exception {
+    private static JSONObject buildRoute(RouteMode mode, RuleSetInstaller.Paths paths,
+                                         String latencyProbeHost) throws Exception {
         JSONArray rules = new JSONArray()
                 .put(new JSONObject().put("action", "sniff"))
                 .put(new JSONObject().put("protocol", "dns").put("action", "hijack-dns"))
@@ -384,6 +399,12 @@ final class SingBoxConfigBuilder {
                         .put("domain_suffix", new JSONArray().put("lan").put("local"))
                         .put("action", "route")
                         .put("outbound", "direct"));
+        if (!latencyProbeHost.isEmpty()) {
+            rules.put(new JSONObject()
+                    .put("domain", new JSONArray().put(latencyProbeHost))
+                    .put("action", "route")
+                    .put("outbound", "proxy"));
+        }
         if (mode == RouteMode.SMART) {
             rules.put(new JSONObject()
                     .put("rule_set", new JSONArray().put("geosite-cn"))
@@ -409,6 +430,18 @@ final class SingBoxConfigBuilder {
                 .put("final", "proxy")
                 .put("default_domain_resolver", "local-dns")
                 .put("auto_detect_interface", true);
+    }
+
+    private static String latencyProbeHost(String rawTarget) {
+        String target = rawTarget == null ? "" : rawTarget.trim();
+        if (target.isEmpty()) target = DEFAULT_LATENCY_URL;
+        if (!target.contains("://")) target = "https://" + target;
+        try {
+            String host = new URL(target).getHost();
+            return host == null ? "" : host.trim().toLowerCase(Locale.ROOT);
+        } catch (Exception ignored) {
+            return "";
+        }
     }
 
     private static JSONObject buildTransport(Map<String, String> q, String rawType) throws Exception {
