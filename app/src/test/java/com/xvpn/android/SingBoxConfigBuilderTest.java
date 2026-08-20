@@ -49,7 +49,7 @@ public final class SingBoxConfigBuilderTest {
 
     @Test public void stableReleaseWinsOverMatchingPrerelease() {
         assertTrue(AppUpdateChecker.compareVersions("1.0.0", "1.0.0-rc1") > 0);
-        assertTrue(AppUpdateChecker.compareVersions("1.0.0-rc5", "1.0.0-rc4") > 0);
+        assertTrue(AppUpdateChecker.compareVersions("1.0.0-rc6", "1.0.0-rc5") > 0);
         assertTrue(AppUpdateChecker.compareVersions("1.0.1", "1.0.0") > 0);
         assertEquals(0, AppUpdateChecker.compareVersions("v1.0.0", "1.0.0"));
     }
@@ -82,6 +82,22 @@ public final class SingBoxConfigBuilderTest {
         assertNotNull(routeRule);
         assertEquals("secure-dns", dnsRule.getString("server"));
         assertEquals("proxy", routeRule.getString("outbound"));
+    }
+
+    @Test public void exitIpClassificationIsConservative() throws Exception {
+        ExitIpClassifier.Info hosting = ExitIpClassifier.fromIpApi(new JSONObject()
+                .put("ip", "203.0.113.8").put("is_datacenter", true)
+                .put("company_name", "Example Cloud").put("cc", "JP"), "JP");
+        assertNotNull(hosting);
+        assertEquals("机房 IP", hosting.typeLabel);
+        assertEquals("地区匹配", hosting.regionLabel);
+
+        ExitIpClassifier.Info residential = ExitIpClassifier.fromIpApi(new JSONObject()
+                .put("ip", "198.51.100.9").put("is_datacenter", false)
+                .put("asn_org", "Example Broadband ISP").put("cc", "TW"), "TW");
+        assertNotNull(residential);
+        assertEquals("家宽 / 运营商 IP", residential.typeLabel);
+        assertEquals("原生地区候选", residential.regionLabel);
     }
 
     private static void assertBaseNetworkProfile(JSONObject root) throws Exception {

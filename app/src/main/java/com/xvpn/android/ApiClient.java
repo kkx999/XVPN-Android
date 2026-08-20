@@ -66,6 +66,35 @@ final class ApiClient {
         }
     }
 
+    /** Small unauthenticated JSON lookup used for the current VPN egress card. */
+    static JSONObject publicJson(String target) throws ApiException {
+        HttpURLConnection conn = null;
+        try {
+            URL url = new URL(target);
+            if (!"https".equalsIgnoreCase(url.getProtocol())) {
+                throw new IllegalArgumentException("Public lookup must use HTTPS");
+            }
+            conn = (HttpURLConnection) url.openConnection();
+            conn.setConnectTimeout(5000);
+            conn.setReadTimeout(5000);
+            conn.setRequestMethod("GET");
+            conn.setUseCaches(false);
+            applyCommonHeaders(conn);
+            int status = conn.getResponseCode();
+            String text = readAll(status >= 200 && status < 300 ? conn.getInputStream() : conn.getErrorStream());
+            if (status < 200 || status >= 300) {
+                throw new ApiException(status, "PUBLIC_HTTP_" + status, "出口 IP 服务暂不可用", 0);
+            }
+            return text.isEmpty() ? new JSONObject() : new JSONObject(text);
+        } catch (ApiException error) {
+            throw error;
+        } catch (Exception error) {
+            throw new ApiException(0, "PUBLIC_NETWORK_ERROR", friendlyNetworkError(error), 0);
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
+    }
+
     private static void applyCommonHeaders(HttpURLConnection conn) {
         // Cloudflare Browser Integrity Check may reject non-standard API client User-Agent values.
         // Use a normal Android mobile browser signature for transport compatibility, while keeping

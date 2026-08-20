@@ -96,6 +96,10 @@ public final class MainActivity extends android.app.Activity {
     private FrameLayout currentRoot;
     private Dialog activeNodePicker;
     private volatile boolean updateCheckRunning = false;
+    private volatile boolean exitIpLoading = false;
+    private volatile ExitIpClassifier.Info exitIpInfo;
+    private volatile String exitIpSessionKey = "";
+    private volatile String exitIpError = "";
     private float uiScale = 1f;
     private float uiTextScale = 1f;
     private View activeNotice;
@@ -165,11 +169,15 @@ public final class MainActivity extends android.app.Activity {
         showLaunchTransition();
     }
 
-    /** Move only the previous built-in value to the new Apple default. */
+    /** Move previous built-in connectivity targets to the current Apple default. */
     private void migrateLatencyTargetPreference() {
         String stored=prefs.getString("latency_test_url",null);
         String normalized=stored==null?"":stored.trim();
-        if(normalized.isEmpty()||RETIRED_DEFAULT_LATENCY_URL.equalsIgnoreCase(normalized)){
+        boolean retired=RETIRED_DEFAULT_LATENCY_URL.equalsIgnoreCase(normalized)
+                ||"http://www.gstatic.com/generate_204".equalsIgnoreCase(normalized)
+                ||"https://connectivitycheck.gstatic.com/generate_204".equalsIgnoreCase(normalized)
+                ||"http://connectivitycheck.gstatic.com/generate_204".equalsIgnoreCase(normalized);
+        if(normalized.isEmpty()||retired){
             prefs.edit().putString("latency_test_url",DEFAULT_LATENCY_URL).apply();
         }
     }
@@ -688,8 +696,9 @@ public final class MainActivity extends android.app.Activity {
         if(selectedNode!=null) edit.putInt("selected_node_id",selectedNode.id); else edit.remove("selected_node_id");
         long reportInterval=Math.max(60L,Math.min(3600L,boot.optLong("traffic_report_interval_seconds",300L)));
         long updateInterval=Math.max(3600L,Math.min(7L*24L*3600L,boot.optLong("app_update_check_interval_seconds",43200L)));
-        boolean trafficReporting=boot.optBoolean("traffic_reporting",false)
-                && (user==null || !"admin".equalsIgnoreCase(user.optString("role","user")));
+        // Admin accounts were previously excluded here, which silently
+        // disabled both Panel reports and the user's traffic cards.
+        boolean trafficReporting=boot.optBoolean("traffic_reporting",false);
         edit.putLong("traffic_report_interval_seconds",reportInterval)
                 .putLong("app_update_check_interval_seconds",updateInterval)
                 .putBoolean("traffic_reporting",trafficReporting).apply();
@@ -775,6 +784,8 @@ private void showShell(int tab) {
         View node=nodeCard(); page.addView(node,matchWrap()); reveal(node,115,6);
         gap(page,13);
 
+        View exitIp=exitIpCard(core); page.addView(exitIp,matchWrap());
+
         LinearLayout speeds=row();
         speeds.addView(speedCard("↑","上传",formatRate(core.uploadRate),p.success,p.successSoft,"home_up_speed"),new LinearLayout.LayoutParams(0,dp(82),1f));
         gapH(speeds,12);
@@ -837,7 +848,7 @@ private void setRouteMode(RouteMode mode) {
             global.animate().alpha(.55f).setDuration(70).withEndAction(()->{global.setTextColor(mode==RouteMode.GLOBAL?Color.WHITE:p.ink);global.animate().alpha(1f).setDuration(120).start();}).start();
             track.setTag(null);
             if(preparedConfig!=null&&connectedNode!=null){
-                VpnCoreService.reconfigure(this,preparedConfig,connectedNode.id,connectedNode.name,mode.label);
+                VpnCoreService.reconfigure(this,preparedConfig,connectedNode.id,connectedNode.name,mode.label,latencyTestUrl());
                 toast("正在切换为"+mode.label+"…");
             }
         }).start();
@@ -874,6 +885,7 @@ private void setRouteMode(RouteMode mode) {
         if(desc!=null)desc.setText(coreStateDescription(core));
         if(up!=null)up.setText(formatRate(core.uploadRate));
         if(down!=null)down.setText(formatRate(core.downloadRate));
+        refreshExitIpBoundViews(core);
     }
 
     private String coreStateTitle(CoreState.Snapshot core) {
@@ -942,6 +954,112 @@ private void setRouteMode(RouteMode mode) {
         LinearLayout txt=column(); LinearLayout.LayoutParams tlp=new LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1f); tlp.leftMargin=dp(10); txt.addView(text(label,11,p.muted,false),matchWrap()); TextView metric=text(value,15,accent,true); metric.setTag(valueTag); txt.addView(metric,matchWrap()); card.addView(txt,tlp); return card;
     }
 
+    private View exitIpCard(CoreState.Snapshot core) {
+        LinearLayout block=column(); block.setTag("home_exit_ip_block");
+        LinearLayout card=row(); card.setGravity(Gravity.CENTER_VERTICAL); card.setPadding(dp(15),dp(12),dp(12),dp(12)); card.setBackground(floatingCardBg(19));
+        TextView icon=text("◎",21,p.accent,true); icon.setGravity(Gravity.CENTER); icon.setBackground(roundRect(p.accentSoft,13,0,0)); card.addView(icon,new LinearLayout.LayoutParams(dp(42),dp(42)));
+        LinearLayout labels=column(); LinearLayout.LayoutParams labelLp=new LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1f); labelLp.leftMargin=dp(11);
+        TextView ip=text("正在识别出口…",14,p.ink,true); ip.setTag("home_exit_ip_value"); labels.addView(ip,matchWrap());
+        TextView provider=text("连接后自动检测公网 IP 与网络属性",10,p.muted,false); provider.setTag("home_exit_ip_meta"); labels.addView(provider,matchWrap()); card.addView(labels,labelLp);
+        TextView type=text("智能识别",10,p.accent,true); type.setTag("home_exit_ip_type"); type.setGravity(Gravity.CENTER); type.setPadding(dp(9),dp(6),dp(9),dp(6)); type.setBackground(roundRect(p.accentSoft,13,0,0)); card.addView(type,wrapWrap());
+        pressMotion(card,.985f);
+        card.setOnClickListener(v->{
+            CoreState.Snapshot state=CoreState.read(this);
+            if(state.state!=CoreState.RUNNING){toast("连接成功后显示出口 IP");return;}
+            v.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+            if(exitIpInfo!=null)showExitIpDetail();else maybeLoadExitIp(state,true);
+        });
+        block.addView(card,matchWrap()); gap(block,13);
+        block.setVisibility(core.state==CoreState.RUNNING?View.VISIBLE:View.GONE);
+        if(core.state==CoreState.RUNNING)block.post(()->maybeLoadExitIp(CoreState.read(this),false));
+        return block;
+    }
+
+    private void refreshExitIpBoundViews(CoreState.Snapshot core) {
+        View block=currentRoot==null?null:currentRoot.findViewWithTag("home_exit_ip_block");
+        if(block==null)return;
+        if(core.state!=CoreState.RUNNING){block.setVisibility(View.GONE);return;}
+        block.setVisibility(View.VISIBLE);
+        TextView value=currentRoot.findViewWithTag("home_exit_ip_value");
+        TextView meta=currentRoot.findViewWithTag("home_exit_ip_meta");
+        TextView type=currentRoot.findViewWithTag("home_exit_ip_type");
+        if(exitIpInfo!=null){
+            if(value!=null)value.setText(exitIpInfo.ip);
+            if(meta!=null)meta.setText(shortProvider(exitIpInfo.provider)+" · "+exitIpInfo.regionLabel);
+            if(type!=null){type.setText(exitIpInfo.typeLabel);type.setTextColor("机房 IP".equals(exitIpInfo.typeLabel)?p.warningText:p.success);}
+        }else if(exitIpLoading){
+            if(value!=null)value.setText("正在识别出口…");
+            if(meta!=null)meta.setText("正在通过当前隧道读取公网 IP");
+            if(type!=null){type.setText("检测中");type.setTextColor(p.accent);}
+        }else if(!exitIpError.isEmpty()){
+            if(value!=null)value.setText("出口 IP 暂不可用");
+            if(meta!=null)meta.setText("点击卡片重新检测");
+            if(type!=null){type.setText("重试");type.setTextColor(p.warningText);}
+        }
+        maybeLoadExitIp(core,false);
+    }
+
+    private void maybeLoadExitIp(CoreState.Snapshot core,boolean force) {
+        if(core.state!=CoreState.RUNNING||core.nodeId<=0)return;
+        String key=core.nodeId+":"+core.startedAt;
+        if(!force&&key.equals(exitIpSessionKey)&&(exitIpLoading||exitIpInfo!=null||!exitIpError.isEmpty()))return;
+        exitIpSessionKey=key;exitIpInfo=null;exitIpError="";exitIpLoading=true;
+        if(currentRoot!=null&&currentTab==TAB_HOME)refreshExitIpBoundViewsWithoutLoad();
+        NodeCatalog.Node active=catalog.find(core.nodeId);
+        String expectedCountry=active==null?"":active.countryCode;
+        probeExecutor.submit(()->{
+            ExitIpClassifier.Info result=null;Exception failure=null;
+            try{result=ExitIpClassifier.fromIpApi(ApiClient.publicJson("https://api.ipapi.is/"),expectedCountry);}
+            catch(Exception first){failure=first;}
+            if(result==null){
+                try{result=ExitIpClassifier.fromIpWho(ApiClient.publicJson("https://ipwho.is/?fields=success,ip,country_code,connection,security"),expectedCountry);}
+                catch(Exception second){failure=second;}
+            }
+            final ExitIpClassifier.Info resolved=result;final Exception error=failure;
+            runOnUiThread(()->{
+                if(!key.equals(exitIpSessionKey))return;
+                exitIpLoading=false;exitIpInfo=resolved;exitIpError=resolved==null?(error==null?"检测服务暂无响应":apiMessage(error)):"";
+                refreshExitIpBoundViewsWithoutLoad();
+            });
+        });
+    }
+
+    private void refreshExitIpBoundViewsWithoutLoad(){
+        if(currentRoot==null||currentTab!=TAB_HOME)return;
+        TextView value=currentRoot.findViewWithTag("home_exit_ip_value");
+        TextView meta=currentRoot.findViewWithTag("home_exit_ip_meta");
+        TextView type=currentRoot.findViewWithTag("home_exit_ip_type");
+        if(exitIpInfo!=null){
+            if(value!=null)value.setText(exitIpInfo.ip);
+            if(meta!=null)meta.setText(shortProvider(exitIpInfo.provider)+" · "+exitIpInfo.regionLabel);
+            if(type!=null){type.setText(exitIpInfo.typeLabel);type.setTextColor("机房 IP".equals(exitIpInfo.typeLabel)?p.warningText:p.success);}
+        }else if(exitIpLoading){
+            if(value!=null)value.setText("正在识别出口…");if(meta!=null)meta.setText("正在通过当前隧道读取公网 IP");if(type!=null){type.setText("检测中");type.setTextColor(p.accent);}
+        }else{
+            if(value!=null)value.setText("出口 IP 暂不可用");if(meta!=null)meta.setText("点击卡片重新检测");if(type!=null){type.setText("重试");type.setTextColor(p.warningText);}
+        }
+    }
+
+    private String shortProvider(String provider){
+        String value=provider==null?"":provider.trim();
+        if(value.isEmpty())return "运营商待确认";
+        return value.length()>24?value.substring(0,24)+"…":value;
+    }
+
+    private void showExitIpDetail(){
+        ExitIpClassifier.Info info=exitIpInfo;if(info==null){maybeLoadExitIp(CoreState.read(this),true);return;}
+        Dialog dialog=bottomDialog();LinearLayout sheet=sheet();
+        sheet.addView(text("出口网络",21,p.ink,true),matchWrap());gap(sheet,5);
+        sheet.addView(text("当前信息由 VPN 隧道外部查询；IP 类型为智能识别，不作为运营商线路承诺。",12,p.muted,false),matchWrap());gap(sheet,14);
+        LinearLayout detail=column();detail.setPadding(dp(15),dp(10),dp(15),dp(10));detail.setBackground(roundRect(p.surfaceAlt,18,0,0));
+        detail.addView(detailLine("当前 IP",info.ip),matchWrap());detail.addView(divider());
+        detail.addView(detailLine("网络类型",info.typeLabel),matchWrap());detail.addView(divider());
+        detail.addView(detailLine("地区判断",info.regionLabel),matchWrap());detail.addView(divider());
+        detail.addView(detailLine("运营商",shortProvider(info.provider)),matchWrap());sheet.addView(detail,matchWrap());gap(sheet,14);
+        Button refresh=primaryButton("重新检测出口 IP");refresh.setOnClickListener(v->{dialog.dismiss();maybeLoadExitIp(CoreState.read(this),true);toast("正在重新检测出口 IP");});sheet.addView(refresh,matchWrap());
+        showBottomDialog(dialog,sheet);
+    }
+
     private View buildMine() {
         ScrollView scroll=polishedScrollView(true);
         LinearLayout page=column(); page.setPadding(0,dp(8),0,dp(26)); scroll.addView(page,matchWrap());
@@ -965,15 +1083,19 @@ private void setRouteMode(RouteMode mode) {
         gap(page,14);
 
         JSONObject traffic=bootstrap==null?null:bootstrap.optJSONObject("traffic");
-        String todayValue="—",todaySub="暂无统计",monthValue="—",monthSub="暂无统计",totalValue="—",totalSub="暂无统计";
+        long todayUp=0L,todayDown=0L,monthUp=0L,monthDown=0L,totalUp=0L,totalDown=0L;
         if(traffic!=null){
-            long todayUp=traffic.optLong("today_upload",0L),todayDown=traffic.optLong("today_download",0L);
-            long monthUp=traffic.optLong("month_upload",0L),monthDown=traffic.optLong("month_download",0L);
-            long totalUp=traffic.optLong("total_upload",0L),totalDown=traffic.optLong("total_download",0L);
-            todayValue=formatBytesCompact(todayUp+todayDown); todaySub="↑ "+formatBytesCompact(todayUp)+" · ↓ "+formatBytesCompact(todayDown);
-            monthValue=formatBytesCompact(monthUp+monthDown); monthSub="↑ "+formatBytesCompact(monthUp)+" · ↓ "+formatBytesCompact(monthDown);
-            totalValue=formatBytesCompact(totalUp+totalDown); totalSub="↑ "+formatBytesCompact(totalUp)+" · ↓ "+formatBytesCompact(totalDown);
+            todayUp=traffic.optLong("today_upload",0L);todayDown=traffic.optLong("today_download",0L);
+            monthUp=traffic.optLong("month_upload",0L);monthDown=traffic.optLong("month_download",0L);
+            totalUp=traffic.optLong("total_upload",0L);totalDown=traffic.optLong("total_download",0L);
         }
+        String day=java.time.LocalDate.now().toString();String month=day.length()>=7?day.substring(0,7):day;
+        if(day.equals(prefs.getString("local_traffic_day_key",""))){todayUp=Math.max(todayUp,prefs.getLong("local_traffic_today_up",0L));todayDown=Math.max(todayDown,prefs.getLong("local_traffic_today_down",0L));}
+        if(month.equals(prefs.getString("local_traffic_month_key",""))){monthUp=Math.max(monthUp,prefs.getLong("local_traffic_month_up",0L));monthDown=Math.max(monthDown,prefs.getLong("local_traffic_month_down",0L));}
+        totalUp=Math.max(totalUp,prefs.getLong("local_traffic_total_up",0L));totalDown=Math.max(totalDown,prefs.getLong("local_traffic_total_down",0L));
+        String todayValue=formatBytesCompact(todayUp+todayDown),todaySub="↑ "+formatBytesCompact(todayUp)+" · ↓ "+formatBytesCompact(todayDown);
+        String monthValue=formatBytesCompact(monthUp+monthDown),monthSub="↑ "+formatBytesCompact(monthUp)+" · ↓ "+formatBytesCompact(monthDown);
+        String totalValue=formatBytesCompact(totalUp+totalDown),totalSub="↑ "+formatBytesCompact(totalUp)+" · ↓ "+formatBytesCompact(totalDown);
         LinearLayout stats=row();
         stats.addView(miniStat("今日",todayValue,todaySub),new LinearLayout.LayoutParams(0,dp(94),1f)); gapH(stats,10);
         stats.addView(miniStat("本月",monthValue,monthSub),new LinearLayout.LayoutParams(0,dp(94),1f)); gapH(stats,10);
@@ -994,7 +1116,7 @@ private void setRouteMode(RouteMode mode) {
         TextView settingsTitle=text("连接与测试",11,p.subtle,true); settingsTitle.setLetterSpacing(.08f); page.addView(settingsTitle,matchWrap());
         gap(page,8);
         LinearLayout settings=column(); settings.setBackground(floatingCardBg(22));
-        settings.addView(settingRow("延迟测试网站",latencyTargetLabel(),this::showLatencyTargetSettings),matchWrap());
+        settings.addView(settingRow("联网检测网站",latencyTargetLabel(),this::showLatencyTargetSettings),matchWrap());
         settings.addView(divider());
         settings.addView(settingRow("连接诊断",connectionDiagnosticLabel(),this::showConnectionDiagnostic),matchWrap());
         settings.addView(divider());
@@ -1187,7 +1309,7 @@ private void setRouteMode(RouteMode mode) {
         if(pendingCoreConfig==null || pendingCoreConfig.isEmpty() || pendingCoreNodeId<=0){toast("节点配置已失效，请重试");return;}
         String config=pendingCoreConfig; int id=pendingCoreNodeId; String name=pendingCoreNodeName; String label=pendingCoreRouteLabel;
         clearPendingCore();
-        VpnCoreService.start(this,config,id,name,label);
+        VpnCoreService.start(this,config,id,name,label,latencyTestUrl());
         refreshCoreBoundViews();
     }
 
@@ -1326,7 +1448,7 @@ private void setRouteMode(RouteMode mode) {
     }
 
     private boolean reconfigureConnectedNode(NodeCatalog.Node node) {
-        return reconfigureConnectedNode(node,"");
+        return reconfigureConnectedNode(node,latencyTestUrl());
     }
 
     private boolean reconfigureConnectedNode(NodeCatalog.Node node,String healthTarget) {
@@ -1335,10 +1457,8 @@ private void setRouteMode(RouteMode mode) {
         if(core.state!=CoreState.RUNNING||core.nodeId==node.id)return true;
         try{
             String config=SingBoxConfigBuilder.build(this,node,routeMode).toString();
-            if(healthTarget==null||healthTarget.isEmpty())
-                VpnCoreService.reconfigure(this,config,node.id,node.name,routeMode.label);
-            else
-                VpnCoreService.reconfigure(this,config,node.id,node.name,routeMode.label,healthTarget);
+            VpnCoreService.reconfigure(this,config,node.id,node.name,routeMode.label,
+                    healthTarget==null||healthTarget.isEmpty()?latencyTestUrl():healthTarget);
             toast("正在切换至 "+node.name+"…");
             return true;
         }catch(Exception e){
@@ -1426,26 +1546,11 @@ private void setRouteMode(RouteMode mode) {
         for(InetAddress address:resolved){
             if(!(address instanceof java.net.Inet4Address))continue;
             hasIpv4=true;
-            try(Socket socket=new Socket()){
-                VpnCoreService.prepareProbeSocket(socket);
+            try(Socket socket=VpnCoreService.createProbeSocket()){
                 long start=System.nanoTime();
                 socket.connect(new InetSocketAddress(address,endpoint.port),timeoutMs);
                 return Math.max(1,(System.nanoTime()-start)/1_000_000L);
             }catch(Exception e){last=e;}
-        }
-        // A few vendor ROMs reject protected/bound probe sockets while a VPN
-        // is active. For an inactive candidate only, fall back through the
-        // current tunnel instead of displaying a false "不可达". The direct
-        // physical TCP handshake remains the primary (and lower) result.
-        if(CoreState.read(this).state==CoreState.RUNNING&&!isCurrentTunnelNode(node)){
-            for(InetAddress address:resolved){
-                if(!(address instanceof java.net.Inet4Address))continue;
-                try(Socket socket=new Socket()){
-                    long start=System.nanoTime();
-                    socket.connect(new InetSocketAddress(address,endpoint.port),Math.min(timeoutMs,2200));
-                    return Math.max(1,(System.nanoTime()-start)/1_000_000L);
-                }catch(Exception e){last=e;}
-            }
         }
         if(!hasIpv4)throw new NodeProbeException("仅 IPv6",null);
         if(last instanceof SocketTimeoutException)throw new NodeProbeException("超时",last);
@@ -1500,11 +1605,11 @@ private void setRouteMode(RouteMode mode) {
 
     private void showLatencyTargetSettings() {
         Dialog dialog=bottomDialog(); LinearLayout sheet=sheet();
-        sheet.addView(text("延迟测试网站",21,p.ink,true),matchWrap()); gap(sheet,5);
-        sheet.addView(text("用于当前隧道的 HTTP/HTTPS 连通性测试；普通节点延迟仍以节点入口 TCP 握手为准。",12,p.muted,false),matchWrap()); gap(sheet,14);
+        sheet.addView(text("联网检测网站",21,p.ink,true),matchWrap()); gap(sheet,5);
+        sheet.addView(text("保存后会用于首次连接、节点切换和连接诊断；节点列表延迟统一使用直连入口 TCP 握手，不会用隧道结果冒充。",12,p.muted,false),matchWrap()); gap(sheet,14);
         EditText url=input("https://example.com",false); url.setText(latencyTestUrl()); url.setInputType(InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_VARIATION_URI); sheet.addView(url,matchWrap());
         gap(sheet,10);
-        TextView status=text("默认：Apple success.html",11,p.muted,false); sheet.addView(status,matchWrap()); gap(sheet,14);
+        TextView status=text("当前："+latencyHostLabel(latencyTestUrl()),11,p.muted,false); sheet.addView(status,matchWrap()); gap(sheet,14);
         LinearLayout actions=row(); Button test=secondaryButton("测试网站"); Button save=primaryButton("保存"); actions.addView(test,new LinearLayout.LayoutParams(0,dp(52),1f)); gapH(actions,10); actions.addView(save,new LinearLayout.LayoutParams(0,dp(52),1f)); sheet.addView(actions,matchWrap()); gap(sheet,8);
         TextView reset=text("恢复默认网站",12,p.accent,true); reset.setGravity(Gravity.CENTER); reset.setPadding(dp(8),dp(10),dp(8),dp(8)); sheet.addView(reset,matchWrap());
 
@@ -1552,7 +1657,7 @@ private void setRouteMode(RouteMode mode) {
         Button run=primaryButton("开始检测");run.setEnabled(core.state==CoreState.RUNNING);run.setAlpha(run.isEnabled()?1f:.58f);sheet.addView(run,matchWrap());
         run.setOnClickListener(v->{
             run.setEnabled(false);run.setAlpha(.78f);run.setText("检测中…");result.setText("正在通过隧道访问检测站点…");result.setTextColor(p.muted);
-            io.execute(()->{VpnCoreService.TunnelHealth health=VpnCoreService.checkTunnelHealthNow();runOnUiThread(()->{
+            io.execute(()->{VpnCoreService.TunnelHealth health=VpnCoreService.checkTunnelHealthNow(latencyTestUrl());runOnUiThread(()->{
                 run.setEnabled(true);run.setAlpha(1f);run.setText("重新检测");
                 if(health.healthy){result.setText("网络正常 · "+health.endpoint+" · "+health.latencyMs+" ms");result.setTextColor(p.success);}
                 else{result.setText("检测失败 · "+health.error);result.setTextColor(p.danger);}
@@ -2214,13 +2319,25 @@ private android.graphics.drawable.Drawable floatingCardBg(float radius){
     private FrameLayout.LayoutParams matchMatch(){return new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.MATCH_PARENT);}
     private void setBusy(Button b,ProgressBar busy,boolean value,String busyText,String normal){b.setEnabled(!value);b.setText(value?busyText:normal);b.setAlpha(value?.78f:1f);busy.setVisibility(value?View.VISIBLE:View.GONE);}
 
-    private Dialog bottomDialog(){Dialog d=new PremiumBottomDialog();d.requestWindowFeature(Window.FEATURE_NO_TITLE);d.setContentView(new FrameLayout(this));Window w=d.getWindow();if(w!=null){w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));w.setLayout(WindowManager.LayoutParams.MATCH_PARENT,WindowManager.LayoutParams.WRAP_CONTENT);w.setGravity(Gravity.BOTTOM);w.setDimAmount(0f);w.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);}return d;}
+    private Dialog bottomDialog(){Dialog d=new PremiumBottomDialog();d.requestWindowFeature(Window.FEATURE_NO_TITLE);d.setContentView(new FrameLayout(this));Window w=d.getWindow();if(w!=null){w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));w.setLayout(WindowManager.LayoutParams.MATCH_PARENT,WindowManager.LayoutParams.WRAP_CONTENT);w.setGravity(Gravity.BOTTOM);w.setDimAmount(0f);w.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);styleDialogNavigationBar(w);}return d;}
     private LinearLayout sheet(){
-        LinearLayout s=column();s.setPadding(dp(22),dp(11),dp(22),dp(30));
-        GradientDrawable fill=new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,p.dark?new int[]{0xFF171E2A,0xFF11161F}:new int[]{0xFFFFFFFF,0xFFFAFBFF});fill.setCornerRadius(dp(28));
-        GradientDrawable rim=roundRect(Color.TRANSPARENT,28,p.dark?0x705D82FF:0x385D82FF,1);s.setBackground(new LayerDrawable(new android.graphics.drawable.Drawable[]{fill,rim}));
+        LinearLayout s=column();s.setPadding(dp(22),dp(11),dp(22),dp(26));
+        float radius=dp(28);float[] topCorners={radius,radius,radius,radius,0f,0f,0f,0f};
+        GradientDrawable fill=new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,p.dark?new int[]{0xFF171E2A,0xFF11161F}:new int[]{0xFFFFFFFF,0xFFFAFBFF});fill.setCornerRadii(topCorners);
+        GradientDrawable rim=new GradientDrawable();rim.setColor(Color.TRANSPARENT);rim.setCornerRadii(topCorners);rim.setStroke(dp(1),p.dark?0x705D82FF:0x385D82FF);s.setBackground(new LayerDrawable(new android.graphics.drawable.Drawable[]{fill,rim}));
         FrameLayout handleSlot=new FrameLayout(this);View handle=new View(this);handle.setBackground(roundRect(p.dark?0x806F7E9B:0x405D82FF,3,0,0));FrameLayout.LayoutParams hp=new FrameLayout.LayoutParams(dp(42),dp(4),Gravity.CENTER);handleSlot.addView(handle,hp);s.addView(handleSlot,new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,dp(9)));gap(s,11);
         return s;
+    }
+    @SuppressWarnings("deprecation")
+    private void styleDialogNavigationBar(Window window){
+        int color=p.dark?0xFF11161F:0xFFFAFBFF;
+        window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
+        window.setNavigationBarColor(color);
+        if(Build.VERSION.SDK_INT>=Build.VERSION_CODES.P)window.setNavigationBarDividerColor(color);
+        if(Build.VERSION.SDK_INT>=Build.VERSION_CODES.Q)window.setNavigationBarContrastEnforced(false);
+        int flags=window.getDecorView().getSystemUiVisibility();
+        if(!p.dark)flags|=View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;else flags&=~View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+        window.getDecorView().setSystemUiVisibility(flags);
     }
     private void showBottomDialog(Dialog d,LinearLayout sheet){
         ScrollView scroll=polishedScrollView(false); scroll.addView(sheet,matchWrap()); d.setContentView(scroll);
@@ -2228,6 +2345,7 @@ private android.graphics.drawable.Drawable floatingCardBg(float radius){
         d.setOnShowListener(x->{
             Window w=d.getWindow();
             if(w!=null){
+                styleDialogNavigationBar(w);
                 int maxH=(int)(getResources().getDisplayMetrics().heightPixels*.84f);
                 int width=getResources().getDisplayMetrics().widthPixels;
                 sheet.measure(View.MeasureSpec.makeMeasureSpec(width,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(maxH,View.MeasureSpec.AT_MOST));

@@ -22,8 +22,8 @@ XVPN 从第一个可安装测试版开始就使用同一套 Release Keystore。�
 
 当前：
 
-- `versionName = 1.0.0-rc5`
-- `versionCode = 10022`
+- `versionName = 1.0.0-rc6`
+- `versionCode = 10023`
 
 ## 当前 Release 证书指纹（公开校验信息）
 

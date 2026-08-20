@@ -123,6 +123,9 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
     private volatile long uploadTotal;
     private volatile long downloadTotal;
     private volatile long lastNotificationAt;
+    private long recordedUploadTotal;
+    private long recordedDownloadTotal;
+    private long lastLocalTrafficPersistAt;
 
     public static boolean isLive() { return live; }
 
@@ -132,34 +135,25 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
             return InetAddress.getAllByName(host);
         }
         Network physical = service.physicalNetwork();
-        Exception physicalError = null;
-        if (physical != null) {
-            try {
-                InetAddress[] answers=physical.getAllByName(host);
-                for(InetAddress answer:answers)
-                    if(answer instanceof java.net.Inet4Address)return answers;
-                physicalError=new UnknownHostException("物理网络未返回 IPv4 地址");
-            }
-            catch (Exception error) { physicalError = error; }
-        }
-        // Some domestic resolvers refuse a node hostname even though the
-        // already-running tunnel can resolve it. Use the tunnel resolver only
-        // as a lookup fallback; the actual entry probe is still protected and
-        // bound to the physical network by prepareProbeSocket().
-        try { return InetAddress.getAllByName(host); }
-        catch (Exception tunnelError) {
-            if (physicalError != null) throw physicalError;
-            throw tunnelError;
-        }
+        if (physical == null) throw new IOException("未找到可用的物理网络");
+        InetAddress[] answers = physical.getAllByName(host);
+        for (InetAddress answer : answers) if (answer instanceof java.net.Inet4Address) return answers;
+        throw new UnknownHostException("物理网络未返回 IPv4 地址");
     }
 
-    static void prepareProbeSocket(Socket socket) throws Exception {
+    /** Creates the same direct entry-test socket whether the VPN is on or off. */
+    static Socket createProbeSocket() throws Exception {
         VpnCoreService service = activeInstance;
-        if (service == null || !CoreState.read(service).isActive()) return;
+        if (service == null || !CoreState.read(service).isActive()) return new Socket();
         Network physical = service.physicalNetwork();
         if (physical == null) throw new IOException("未找到可用的物理网络");
-        if (!service.protect(socket)) throw new IOException("无法让测速连接绕过当前 VPN");
-        physical.bindSocket(socket);
+        Socket socket = physical.getSocketFactory().createSocket();
+        // The Network socket factory has already pinned this socket to the
+        // physical transport. protect() is an additional loop guard; a few
+        // vendor ROMs return false for an already-bound socket, so do not turn
+        // that harmless quirk into another false "不可达" result.
+        if (!service.protect(socket)) Log.w(TAG, "Physical probe socket was already network-bound");
+        return socket;
     }
 
     static TunnelHealth checkTunnelHealthNow() {
@@ -197,12 +191,18 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
     }
 
     static void start(Context context, String config, int nodeId, String nodeName, String routeLabel) {
+        start(context, config, nodeId, nodeName, routeLabel, "");
+    }
+
+    static void start(Context context, String config, int nodeId, String nodeName,
+                      String routeLabel, String healthTarget) {
         Intent intent = new Intent(context, VpnCoreService.class)
                 .setAction(ACTION_START)
                 .putExtra(EXTRA_CONFIG, config)
                 .putExtra(EXTRA_NODE_ID, nodeId)
                 .putExtra(EXTRA_NODE_NAME, nodeName == null ? "" : nodeName)
-                .putExtra(EXTRA_ROUTE_LABEL, routeLabel == null ? "" : routeLabel);
+                .putExtra(EXTRA_ROUTE_LABEL, routeLabel == null ? "" : routeLabel)
+                .putExtra(EXTRA_HEALTH_TARGET, normalizeHealthTarget(healthTarget));
         context.startForegroundService(intent);
     }
 
@@ -210,10 +210,7 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
         reconfigure(context, config, nodeId, nodeName, routeLabel, "");
     }
 
-    /**
-     * A non-empty target is used only for connected-state node selection.
-     * Normal connect and manual switching retain the fixed HTTPS health targets.
-     */
+    /** Uses the same saved HTTP/HTTPS health target for every live reconfiguration. */
     static void reconfigure(Context context, String config, int nodeId, String nodeName,
                             String routeLabel, String healthTarget) {
         Intent intent = new Intent(context, VpnCoreService.class)
@@ -271,6 +268,7 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
         if (commandServer != null || CoreState.read(this).isActive()) return Service.START_NOT_STICKY;
 
         String config = intent.getStringExtra(EXTRA_CONFIG);
+        String healthTarget = normalizeHealthTarget(intent.getStringExtra(EXTRA_HEALTH_TARGET));
         nodeId = intent.getIntExtra(EXTRA_NODE_ID, 0);
         nodeName = value(intent.getStringExtra(EXTRA_NODE_NAME));
         routeLabel = value(intent.getStringExtra(EXTRA_ROUTE_LABEL));
@@ -285,7 +283,7 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
         CoreState.publishLifecycle(this, CoreState.STARTING, nodeId, nodeName, "");
         startForeground(NOTIFICATION_ID, serviceNotification(
                 "XVPN 正在连接", displayNodeName() + " · " + routeLabel, true, false));
-        coreExecutor.execute(() -> startCore(config));
+        coreExecutor.execute(() -> startCore(config, healthTarget));
         return Service.START_NOT_STICKY;
     }
 
@@ -318,7 +316,7 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
         super.onDestroy();
     }
 
-    private void startCore(String config) {
+    private void startCore(String config, String healthTarget) {
         try {
             ensureLibboxSetup();
             Libbox.checkConfig(config);
@@ -336,7 +334,7 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
 
             // First connect stays truthful, but should not wait through a
             // duplicate full verification cycle before the UI can continue.
-            TunnelHealth health = waitForInitialTunnelHealth();
+            TunnelHealth health = waitForInitialTunnelHealth(healthTarget);
             if (!health.healthy) {
                 throw new IllegalStateException("隧道已建立，但联网检测失败：" + health.error);
             }
@@ -413,7 +411,8 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
                         OverrideOptions rollback = new OverrideOptions();
                         rollback.setAutoRedirect(false);
                         server.startOrReloadService(previousConfig, rollback);
-                        TunnelHealth restored = waitForTunnelHealth();
+                        TunnelHealth restored = healthTarget.isEmpty()
+                                ? waitForTunnelHealth() : waitForTunnelHealth(healthTarget);
                         if (!restored.healthy) {
                             throw new IllegalStateException("原连接恢复后仍无法联网：" + restored.error);
                         }
@@ -514,18 +513,20 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
      * protected, so Android sends them into XVPN's TUN and they exercise DNS,
      * routing, the selected protocol and the remote egress together.
      */
-    private TunnelHealth waitForInitialTunnelHealth() {
+    private TunnelHealth waitForInitialTunnelHealth(String healthTarget) {
         // A fresh TUN and its DNS dispatcher can need a short warm-up on some
         // Android carrier networks. The second attempt runs only after a real
         // first failure, so the normal successful connection path stays fast.
-        return waitForTunnelHealth(defaultHealthTargets(), 2);
+        return healthTarget.isEmpty()
+                ? waitForTunnelHealth(defaultHealthTargets(), 2)
+                : waitForTunnelHealth(healthTarget);
     }
 
     private TunnelHealth waitForTunnelHealth() {
         return waitForTunnelHealth(defaultHealthTargets(), 2);
     }
 
-    /** Exact custom target; used by connected-state automatic node selection only. */
+    /** Exact user-selected target for connection and reconfiguration validation. */
     private TunnelHealth waitForTunnelHealth(String target) {
         return waitForTunnelHealth(new String[]{target}, 2);
     }
@@ -552,7 +553,7 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
 
     private String[] defaultHealthTargets() {
         return new String[]{
-                "https://www.gstatic.com/generate_204",
+                "http://www.apple.com/library/test/success.html",
                 "https://github.com/favicon.ico"
         };
     }
@@ -904,6 +905,8 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
         baselineRx = previousRx = rx;
         previousMetricAt = SystemClock.elapsedRealtime();
         uploadTotal = downloadTotal = 0L;
+        recordedUploadTotal = recordedDownloadTotal = 0L;
+        lastLocalTrafficPersistAt = previousMetricAt;
 
         metricsExecutor = Executors.newSingleThreadScheduledExecutor();
         metricsExecutor.scheduleWithFixedDelay(this::updateMetricsSnapshot, 1L, 1L, TimeUnit.SECONDS);
@@ -935,6 +938,7 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
         previousRx = rx;
         previousMetricAt = now;
         CoreState.publishMetrics(this, uploadTotal, downloadTotal, upRate, downRate);
+        persistLocalTrafficDelta(false);
         if (state == CoreState.RUNNING && now - lastNotificationAt >= 2000L) {
             lastNotificationAt = now;
             updateForegroundNotification("XVPN 已连接", connectedNotificationText(upRate, downRate), true);
@@ -993,6 +997,7 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
     }
 
     private void shutdownSchedulers(boolean finalReport) {
+        persistLocalTrafficDelta(true);
         ReportSnapshot finalSnapshot = finalReport ? currentReportSnapshot() : null;
         ScheduledExecutorService metrics = metricsExecutor;
         metricsExecutor = null;
@@ -1002,6 +1007,40 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
         reportExecutor = null;
         if (reports != null) reports.shutdownNow();
         if (finalSnapshot != null) reportIo.execute(() -> reportTrafficSafe(finalSnapshot));
+    }
+
+    /** Keeps useful traffic totals even when a Panel account does not return aggregate fields. */
+    private synchronized void persistLocalTrafficDelta(boolean force) {
+        long nextUp = Math.max(0L, uploadTotal);
+        long nextDown = Math.max(0L, downloadTotal);
+        long deltaUp = Math.max(0L, nextUp - recordedUploadTotal);
+        long deltaDown = Math.max(0L, nextDown - recordedDownloadTotal);
+        if (deltaUp == 0L && deltaDown == 0L) return;
+        long now = SystemClock.elapsedRealtime();
+        if (!force && now - lastLocalTrafficPersistAt < 5000L && deltaUp + deltaDown < 65536L) return;
+
+        SharedPreferences prefs = getSharedPreferences("xvpn_preferences_v1", MODE_PRIVATE);
+        String day = java.time.LocalDate.now().toString();
+        String month = day.length() >= 7 ? day.substring(0, 7) : day;
+        boolean sameDay = day.equals(prefs.getString("local_traffic_day_key", ""));
+        boolean sameMonth = month.equals(prefs.getString("local_traffic_month_key", ""));
+        long todayUp = sameDay ? prefs.getLong("local_traffic_today_up", 0L) : 0L;
+        long todayDown = sameDay ? prefs.getLong("local_traffic_today_down", 0L) : 0L;
+        long monthUp = sameMonth ? prefs.getLong("local_traffic_month_up", 0L) : 0L;
+        long monthDown = sameMonth ? prefs.getLong("local_traffic_month_down", 0L) : 0L;
+        prefs.edit()
+                .putString("local_traffic_day_key", day)
+                .putString("local_traffic_month_key", month)
+                .putLong("local_traffic_today_up", todayUp + deltaUp)
+                .putLong("local_traffic_today_down", todayDown + deltaDown)
+                .putLong("local_traffic_month_up", monthUp + deltaUp)
+                .putLong("local_traffic_month_down", monthDown + deltaDown)
+                .putLong("local_traffic_total_up", prefs.getLong("local_traffic_total_up", 0L) + deltaUp)
+                .putLong("local_traffic_total_down", prefs.getLong("local_traffic_total_down", 0L) + deltaDown)
+                .apply();
+        recordedUploadTotal = nextUp;
+        recordedDownloadTotal = nextDown;
+        lastLocalTrafficPersistAt = now;
     }
 
     private long safeTraffic(long value) { return value < 0L ? 0L : value; }
