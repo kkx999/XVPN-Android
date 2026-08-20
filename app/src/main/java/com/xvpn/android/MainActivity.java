@@ -1590,7 +1590,7 @@ private void setRouteMode(RouteMode mode) {
                     badge.setTextColor(result.error==null?latencyColor(result.latencyMs):result.error instanceof UdpProbeUnavailableException?p.warningText:p.danger);
                     popResult(badge);
                 }
-            }));
+            })));
             NodeCatalog.Node bestNode=null;long bestMs=Long.MAX_VALUE;int udpSkipped=0;
             for(NodeProbeResult result:results){
                 if(result.error==null){prefs.edit().putLong("node_latency_"+result.node.id,result.latencyMs).apply();if(result.latencyMs<bestMs){bestMs=result.latencyMs;bestNode=result.node;}}
