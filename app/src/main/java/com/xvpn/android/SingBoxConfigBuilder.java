@@ -329,7 +329,6 @@ final class SingBoxConfigBuilder {
     }
 
     private static JSONObject buildDns(RouteMode mode, String latencyProbeHost) throws Exception {
-        JSONObject secureTls = new JSONObject().put("enabled", true).put("server_name", "cloudflare-dns.com");
         JSONArray servers = new JSONArray()
                 .put(new JSONObject()
                         // Keep node/bootstrap and direct-domain resolution free
@@ -339,12 +338,13 @@ final class SingBoxConfigBuilder {
                         .put("tag", "local-dns")
                         .put("server", "223.5.5.5"))
                 .put(new JSONObject()
-                        .put("type", "https")
+                        // Use a plain TCP resolver through the proxy. It avoids
+                        // depending on a particular node being able to reach a
+                        // public DoH anycast endpoint, while DNS payloads still
+                        // travel inside the encrypted proxy tunnel.
+                        .put("type", "tcp")
                         .put("tag", "secure-dns")
-                        .put("server", "1.1.1.1")
-                        .put("server_port", 443)
-                        .put("path", "/dns-query")
-                        .put("tls", secureTls)
+                        .put("server", "8.8.8.8")
                         .put("detour", "proxy"));
         JSONObject dns = new JSONObject()
                 .put("servers", servers)

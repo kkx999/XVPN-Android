@@ -49,7 +49,7 @@ public final class SingBoxConfigBuilderTest {
 
     @Test public void stableReleaseWinsOverMatchingPrerelease() {
         assertTrue(AppUpdateChecker.compareVersions("1.0.0", "1.0.0-rc1") > 0);
-        assertTrue(AppUpdateChecker.compareVersions("1.0.0-rc3", "1.0.0-rc2") > 0);
+        assertTrue(AppUpdateChecker.compareVersions("1.0.0-rc4", "1.0.0-rc3") > 0);
         assertTrue(AppUpdateChecker.compareVersions("1.0.1", "1.0.0") > 0);
         assertEquals(0, AppUpdateChecker.compareVersions("v1.0.0", "1.0.0"));
     }
@@ -59,6 +59,13 @@ public final class SingBoxConfigBuilderTest {
                 ApiClient.safeServerMessage(500, "<!doctype html><html><body>internal error</body></html>"));
         assertEquals("接口地址不存在，请检查 Panel 配置", ApiClient.safeServerMessage(404, ""));
         assertEquals("账户被暂停", ApiClient.safeServerMessage(400, "账户被暂停"));
+    }
+
+    @Test public void phoneUiScaleShrinksOnlyWhenSpaceIsTight() {
+        assertEquals(1f, UiScalePolicy.layoutScale(411, 820), .001f);
+        assertTrue(UiScalePolicy.layoutScale(360, 800) < 1f);
+        assertEquals(.86f, UiScalePolicy.layoutScale(320, 700), .001f);
+        assertTrue(UiScalePolicy.textScale(UiScalePolicy.layoutScale(360, 800), 1.3f) < 1f);
     }
 
     @Test public void savedLatencyHostAlwaysUsesProxyAndSecureDns() throws Exception {
@@ -93,9 +100,10 @@ public final class SingBoxConfigBuilderTest {
         assertEquals("223.5.5.5", servers.getJSONObject(0).getString("server"));
         assertFalse(servers.getJSONObject(0).has("detour"));
         assertFalse(servers.getJSONObject(0).has("tls"));
-        assertEquals("https", servers.getJSONObject(1).getString("type"));
-        assertEquals("1.1.1.1", servers.getJSONObject(1).getString("server"));
+        assertEquals("tcp", servers.getJSONObject(1).getString("type"));
+        assertEquals("8.8.8.8", servers.getJSONObject(1).getString("server"));
         assertEquals("proxy", servers.getJSONObject(1).getString("detour"));
+        assertFalse(servers.getJSONObject(1).has("tls"));
         assertEquals("local-dns", root.getJSONObject("route").getString("default_domain_resolver"));
 
         JSONObject quicReject = findRule(root.getJSONObject("route").getJSONArray("rules"),

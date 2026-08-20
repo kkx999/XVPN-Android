@@ -8,7 +8,7 @@ import android.graphics.RectF;
 import android.view.View;
 import android.view.animation.DecelerateInterpolator;
 
-/** Theme-aware glass sync control drawn without font glyphs. */
+/** Theme-aware circular glass refresh control drawn without font glyphs. */
 final class RefreshActionView extends View {
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final boolean dark;
@@ -32,43 +32,38 @@ final class RefreshActionView extends View {
         super.onDraw(canvas);
         float cx = getWidth() / 2f;
         float cy = getHeight() / 2f;
-        float inset = dp(3.8f);
-        panelBounds.set(inset,inset,getWidth()-inset,getHeight()-inset);
+        float radius=Math.min(getWidth(),getHeight())/2f-dp(3.8f);
 
-        // Quiet glass squircle: translucent in light mode, darker and more
-        // defined in dark mode so it stays part of the header rather than
-        // becoming a bright floating badge.
+        // Circular glass plate stays visually soft in both themes and matches
+        // the round connection control without competing with it.
         paint.setStyle(Paint.Style.FILL);
         paint.setColor(soft);
-        paint.setAlpha(dark ? 118 : 188);
-        canvas.drawRoundRect(panelBounds,dp(12f),dp(12f),paint);
+        paint.setAlpha(dark ? 128 : 192);
+        canvas.drawCircle(cx,cy,radius,paint);
 
         paint.setStyle(Paint.Style.STROKE);
         paint.setStrokeCap(Paint.Cap.ROUND);
         paint.setStrokeJoin(Paint.Join.ROUND);
         paint.setStrokeWidth(dp(1f));
         paint.setColor(accent);
-        paint.setAlpha(dark ? 105 : 72);
-        canvas.drawRoundRect(panelBounds,dp(12f),dp(12f),paint);
+        paint.setAlpha(dark ? 112 : 78);
+        canvas.drawCircle(cx,cy,radius,paint);
 
-        float left=cx-dp(8.5f),right=cx+dp(8.5f);
-        float top=cy-dp(4.5f),bottom=cy+dp(4.5f);
-        paint.setStrokeWidth(dp(1.9f));
-        paint.setAlpha(235);
-        canvas.drawLine(left,top,right,top,paint);
-        canvas.drawLine(right,top,right-dp(3.2f),top-dp(2.8f),paint);
-        canvas.drawLine(right,top,right-dp(3.2f),top+dp(2.8f),paint);
-        paint.setAlpha(dark?190:165);
-        canvas.drawLine(right,bottom,left,bottom,paint);
-        canvas.drawLine(left,bottom,left+dp(3.2f),bottom-dp(2.8f),paint);
-        canvas.drawLine(left,bottom,left+dp(3.2f),bottom+dp(2.8f),paint);
+        float arcRadius=dp(8.2f);
+        panelBounds.set(cx-arcRadius,cy-arcRadius,cx+arcRadius,cy+arcRadius);
+        paint.setStrokeWidth(dp(2.05f));
+        paint.setAlpha(230);
+        canvas.drawArc(panelBounds,-58f,286f,false,paint);
+        float ax=cx+arcRadius*.88f,ay=cy-arcRadius*.48f;
+        canvas.drawLine(ax,ay,ax-dp(4.1f),ay-dp(.3f),paint);
+        canvas.drawLine(ax,ay,ax-dp(1.5f),ay+dp(3.6f),paint);
 
         if(spinner!=null&&spinner.isRunning()){
-            float travel=right-left;
+            double angle=Math.toRadians(-58f+286f*phase);
             paint.setStyle(Paint.Style.FILL);
-            paint.setAlpha(dark?220:200);
-            canvas.drawCircle(left+travel*phase,top,dp(1.7f),paint);
-            canvas.drawCircle(right-travel*phase,bottom,dp(1.45f),paint);
+            paint.setAlpha(dark?225:205);
+            canvas.drawCircle(cx+(float)Math.cos(angle)*arcRadius,
+                    cy+(float)Math.sin(angle)*arcRadius,dp(1.65f),paint);
         }
         paint.setStyle(Paint.Style.FILL);
         paint.setAlpha(255);

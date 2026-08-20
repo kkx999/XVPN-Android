@@ -96,6 +96,8 @@ public final class MainActivity extends android.app.Activity {
     private FrameLayout currentRoot;
     private Dialog activeNodePicker;
     private volatile boolean updateCheckRunning = false;
+    private float uiScale = 1f;
+    private float uiTextScale = 1f;
     private View activeNotice;
     private RefreshActionView activeRefreshControl;
     private String pendingCoreConfig;
@@ -157,6 +159,7 @@ public final class MainActivity extends android.app.Activity {
             pendingCoreRouteLabel=savedInstanceState.getString("pending_core_route_label");
         }
         CoreState.reconcileAfterProcessStart(this);
+        updateUiScale();
         refreshPalette();
         applySystemBars();
         showLaunchTransition();
@@ -1283,8 +1286,7 @@ private void setRouteMode(RouteMode mode) {
         LinearLayout info=column(); info.setPadding(dp(15),dp(13),dp(15),dp(13)); info.setBackground(roundRect(p.surfaceAlt,18,0,0));
         info.addView(detailLine("协议",node.protocol.isEmpty()?"—":node.protocol.toUpperCase(Locale.ROOT)),matchWrap());
         info.addView(divider());
-        boolean activeTunnelNode=isCurrentTunnelNode(node);
-        String latencyHint=activeTunnelNode?"测试当前 VPN 隧道":isUdpOnlyNode(node)?"UDP 节点需连接后实测":"测试节点入口 TCP 握手";
+        String latencyHint=isUdpOnlyNode(node)?"UDP 节点需连接后实测":"测试节点入口 TCP 握手";
         info.addView(detailLine("节点延迟",latencyHint),matchWrap());
         sheet.addView(info,matchWrap());
         gap(sheet,14);
@@ -1302,7 +1304,7 @@ private void setRouteMode(RouteMode mode) {
         sheet.addView(actions,matchWrap());
 
         test.setOnClickListener(v->{
-            test.setEnabled(false); test.setText("测速中…"); result.setText(connectedHere?"正在测试当前 VPN 隧道…":"正在连接节点入口…"); result.setTextColor(p.muted);
+            test.setEnabled(false); test.setText("测速中…"); result.setText("正在测试节点入口…"); result.setTextColor(p.muted);
             io.execute(()->{
                 try{
                     long ms=measureNodeLatency(node);
@@ -1324,12 +1326,19 @@ private void setRouteMode(RouteMode mode) {
     }
 
     private boolean reconfigureConnectedNode(NodeCatalog.Node node) {
+        return reconfigureConnectedNode(node,"");
+    }
+
+    private boolean reconfigureConnectedNode(NodeCatalog.Node node,String healthTarget) {
         CoreState.Snapshot core=CoreState.read(this);
         if(core.isBusy()){toast("当前配置正在切换，请稍候…");return false;}
         if(core.state!=CoreState.RUNNING||core.nodeId==node.id)return true;
         try{
             String config=SingBoxConfigBuilder.build(this,node,routeMode).toString();
-            VpnCoreService.reconfigure(this,config,node.id,node.name,routeMode.label);
+            if(healthTarget==null||healthTarget.isEmpty())
+                VpnCoreService.reconfigure(this,config,node.id,node.name,routeMode.label);
+            else
+                VpnCoreService.reconfigure(this,config,node.id,node.name,routeMode.label,healthTarget);
             toast("正在切换至 "+node.name+"…");
             return true;
         }catch(Exception e){
@@ -1405,18 +1414,10 @@ private void setRouteMode(RouteMode mode) {
     private long measureNodeLatency(NodeCatalog.Node node) throws Exception { return measureNodeLatency(node,3000); }
 
     private long measureNodeLatency(NodeCatalog.Node node,int timeoutMs) throws Exception {
-        if(isCurrentTunnelNode(node)){
-            VpnCoreService.TunnelHealth health=VpnCoreService.checkTunnelHealthNow(latencyTestUrl());
-            if(health.healthy)return health.latencyMs;
-            String error=health.error==null?"":health.error;
-            String label=error.contains("DNS")?"DNS失败":error.contains("超时")?"超时":"测试失败";
-            throw new NodeProbeException(label,null);
-        }
         SingBoxConfigBuilder.Endpoint endpoint=SingBoxConfigBuilder.endpoint(node);
         if(!endpoint.tcpProbeSupported){
             throw new UdpProbeUnavailableException();
         }
-        long start=System.nanoTime();
         InetAddress[] resolved;
         try{resolved=VpnCoreService.resolveProbeHost(endpoint.host);}
         catch(UnknownHostException e){throw new NodeProbeException("DNS失败",e);}
@@ -1427,9 +1428,24 @@ private void setRouteMode(RouteMode mode) {
             hasIpv4=true;
             try(Socket socket=new Socket()){
                 VpnCoreService.prepareProbeSocket(socket);
+                long start=System.nanoTime();
                 socket.connect(new InetSocketAddress(address,endpoint.port),timeoutMs);
                 return Math.max(1,(System.nanoTime()-start)/1_000_000L);
             }catch(Exception e){last=e;}
+        }
+        // A few vendor ROMs reject protected/bound probe sockets while a VPN
+        // is active. For an inactive candidate only, fall back through the
+        // current tunnel instead of displaying a false "不可达". The direct
+        // physical TCP handshake remains the primary (and lower) result.
+        if(CoreState.read(this).state==CoreState.RUNNING&&!isCurrentTunnelNode(node)){
+            for(InetAddress address:resolved){
+                if(!(address instanceof java.net.Inet4Address))continue;
+                try(Socket socket=new Socket()){
+                    long start=System.nanoTime();
+                    socket.connect(new InetSocketAddress(address,endpoint.port),Math.min(timeoutMs,2200));
+                    return Math.max(1,(System.nanoTime()-start)/1_000_000L);
+                }catch(Exception e){last=e;}
+            }
         }
         if(!hasIpv4)throw new NodeProbeException("仅 IPv6",null);
         if(last instanceof SocketTimeoutException)throw new NodeProbeException("超时",last);
@@ -1679,14 +1695,8 @@ private void setRouteMode(RouteMode mode) {
         if(nodes.isEmpty()){status.setVisibility(View.VISIBLE);status.setText("当前没有可测速节点");return;}
         nodeScanRunning=true; beginScanAction(action); status.setVisibility(View.VISIBLE); status.setTextColor(p.muted);
         String scanToken=token;
-        if(CoreState.read(this).state==CoreState.RUNNING){
-            String healthTarget=latencyTestUrl();
-            status.setText("将使用 "+latencyHostLabel(healthTarget)+" 逐个真实验证节点，请勿退出…");
-            runConnectedBestNodeScanInPicker(dialog,action,status,latencyBadges,tails,items,pickerChanged,nodes,scanToken,healthTarget);
-            return;
-        }
-
-        status.setText("正在测试节点入口…");
+        boolean connected=CoreState.read(this).state==CoreState.RUNNING;
+        status.setText(connected?"连接保持中 · 正在测试节点入口…":"正在测试节点入口…");
         io.execute(()->{
             List<NodeProbeResult> results=probeNodes(nodes,2200,(result,completed,total)->
                     showPickerProbeResult(dialog,status,latencyBadges,result,completed,total,"入口测试"));
@@ -1697,8 +1707,9 @@ private void setRouteMode(RouteMode mode) {
                 finishScanAction(action,bestNode!=null);
                 if(!scanToken.equals(token)||token.isEmpty()||!dialog.isShowing())return;
                 if(bestNode==null){status.setText("测速完成 · 暂无可用节点");status.setTextColor(p.danger);return;}
-                if(!reconfigureConnectedNode(bestNode)){status.setText("节点可用，但切换配置失败");status.setTextColor(p.danger);return;}
-                selectPickerWinner(dialog,status,tails,items,pickerChanged,bestNode,bestMs,"已选择 ");
+                if(!reconfigureConnectedNode(bestNode,connected?latencyTestUrl():"")){status.setText("节点可用，但切换配置失败");status.setTextColor(p.danger);return;}
+                selectPickerWinner(dialog,status,tails,items,pickerChanged,bestNode,bestMs,
+                        connected?"入口优选完成 · ":"已选择 ");
             });
         });
     }
@@ -2076,15 +2087,22 @@ private void setRouteMode(RouteMode mode) {
     }
 
     // ----- UI helpers -----
+    private void updateUiScale(){
+        Configuration config=getResources().getConfiguration();
+        uiScale=UiScalePolicy.layoutScale(config.screenWidthDp,config.screenHeightDp);
+        // Preserve accessibility while preventing a vendor's oversized font
+        // preset from breaking fixed navigation and button rows.
+        uiTextScale=UiScalePolicy.textScale(uiScale,config.fontScale);
+    }
     private LinearLayout column(){LinearLayout v=new LinearLayout(this);v.setOrientation(LinearLayout.VERTICAL);return v;}
     private LinearLayout row(){LinearLayout v=new LinearLayout(this);v.setOrientation(LinearLayout.HORIZONTAL);return v;}
     private ScrollView polishedScrollView(boolean fillViewport){ScrollView v=new ScrollView(this);v.setFillViewport(fillViewport);v.setClipToPadding(false);v.setVerticalScrollBarEnabled(false);v.setHorizontalScrollBarEnabled(false);v.setFadingEdgeLength(0);v.setOverScrollMode(View.OVER_SCROLL_NEVER);return v;}
-    private TextView text(String s,float sp,int color,boolean bold){TextView t=new TextView(this);t.setText(s);t.setTextSize(sp);t.setTextColor(color);t.setTypeface(Typeface.create("sans",bold?Typeface.BOLD:Typeface.NORMAL));t.setIncludeFontPadding(false);return t;}
+    private TextView text(String s,float sp,int color,boolean bold){TextView t=new TextView(this);t.setText(s);t.setTextSize(sp*uiTextScale);t.setTextColor(color);t.setTypeface(Typeface.create("sans",bold?Typeface.BOLD:Typeface.NORMAL));t.setIncludeFontPadding(false);return t;}
     private TextView pill(String s,int bg,int fg,float sp){TextView t=text(s,sp,fg,true);t.setGravity(Gravity.CENTER);t.setPadding(dp(10),dp(6),dp(10),dp(6));t.setBackground(roundRect(bg,14,0,0));return t;}
     private BrandMarkView brandMark(){
         return new BrandMarkView(this,p.dark);
     }
-    private EditText input(String hint,boolean password){EditText e=new EditText(this);e.setHint(hint);e.setHintTextColor(p.subtle);e.setTextColor(p.ink);e.setTextSize(14);e.setSingleLine(true);e.setPadding(dp(14),0,dp(14),0);e.setBackground(roundRect(p.field,16,p.border,1));e.setMinHeight(dp(55));e.setInputType(password?InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_VARIATION_PASSWORD:InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_VARIATION_NORMAL);return e;}
+    private EditText input(String hint,boolean password){EditText e=new EditText(this);e.setHint(hint);e.setHintTextColor(p.subtle);e.setTextColor(p.ink);e.setTextSize(14*uiTextScale);e.setSingleLine(true);e.setPadding(dp(14),0,dp(14),0);e.setBackground(roundRect(p.field,16,p.border,1));e.setMinHeight(dp(55));e.setInputType(password?InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_VARIATION_PASSWORD:InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_VARIATION_NORMAL);return e;}
     private FrameLayout passwordField(EditText field) {
         FrameLayout box=new FrameLayout(this);
         field.setPadding(dp(14),0,dp(66),0);
@@ -2106,9 +2124,9 @@ private void setRouteMode(RouteMode mode) {
         return box;
     }
 
-    private Button primaryButton(String label){Button b=new Button(this);b.setAllCaps(false);b.setText(label);b.setTextSize(14);b.setTextColor(Color.WHITE);b.setTypeface(Typeface.DEFAULT,Typeface.BOLD);b.setMinHeight(dp(54));b.setBackground(ripple(horizontalGradient(p.accent,p.purple,17),0x33FFFFFF));return flatButton(b);}
-    private Button secondaryButton(String label){Button b=new Button(this);b.setAllCaps(false);b.setText(label);b.setTextSize(14);b.setTextColor(p.ink);b.setTypeface(Typeface.DEFAULT,Typeface.BOLD);b.setMinHeight(dp(54));b.setBackground(ripple(roundRect(p.surface,17,p.border,1),0x11000000));return flatButton(b);}
-    private Button logoutButton(String label){Button b=new Button(this);b.setAllCaps(false);b.setText(label);b.setTextSize(14);b.setTextColor(p.danger);b.setTypeface(Typeface.DEFAULT,Typeface.BOLD);b.setMinHeight(dp(54));b.setBackground(ripple(roundRect(p.surface,17,p.danger,1),p.dark?0x22FF6B77:0x12D54848));return flatButton(b);}
+    private Button primaryButton(String label){Button b=new Button(this);b.setAllCaps(false);b.setText(label);b.setTextSize(14*uiTextScale);b.setTextColor(Color.WHITE);b.setTypeface(Typeface.DEFAULT,Typeface.BOLD);b.setMinHeight(dp(54));b.setBackground(ripple(horizontalGradient(p.accent,p.purple,17),0x33FFFFFF));return flatButton(b);}
+    private Button secondaryButton(String label){Button b=new Button(this);b.setAllCaps(false);b.setText(label);b.setTextSize(14*uiTextScale);b.setTextColor(p.ink);b.setTypeface(Typeface.DEFAULT,Typeface.BOLD);b.setMinHeight(dp(54));b.setBackground(ripple(roundRect(p.surface,17,p.border,1),0x11000000));return flatButton(b);}
+    private Button logoutButton(String label){Button b=new Button(this);b.setAllCaps(false);b.setText(label);b.setTextSize(14*uiTextScale);b.setTextColor(p.danger);b.setTypeface(Typeface.DEFAULT,Typeface.BOLD);b.setMinHeight(dp(54));b.setBackground(ripple(roundRect(p.surface,17,p.danger,1),p.dark?0x22FF6B77:0x12D54848));return flatButton(b);}
     private Button flatButton(Button b){b.setElevation(0f);b.setStateListAnimator(null);b.setPadding(dp(14),0,dp(14),0);return b;}
     private boolean motionEnabled(){return ValueAnimator.areAnimatorsEnabled();}
     private void pressMotion(View v,float pressedScale){
@@ -2190,7 +2208,7 @@ private android.graphics.drawable.Drawable floatingCardBg(float radius){
         return insets.getStableInsetTop();
     }
     private void animateIn(View v,float fromDp){v.setAlpha(0f);v.setTranslationY(dp(fromDp));v.animate().alpha(1f).translationY(0f).setDuration(320).start();}
-    private int dp(float v){return Math.round(v*getResources().getDisplayMetrics().density);}
+    private int dp(float v){return Math.round(v*getResources().getDisplayMetrics().density*uiScale);}
     private LinearLayout.LayoutParams matchWrap(){return new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT);}
     private LinearLayout.LayoutParams wrapWrap(){return new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,ViewGroup.LayoutParams.WRAP_CONTENT);}
     private FrameLayout.LayoutParams matchMatch(){return new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.MATCH_PARENT);}

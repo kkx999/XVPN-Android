@@ -131,8 +131,25 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
             return InetAddress.getAllByName(host);
         }
         Network physical = service.physicalNetwork();
-        if (physical == null) throw new IOException("未找到可用的 Wi-Fi 或移动网络");
-        return physical.getAllByName(host);
+        Exception physicalError = null;
+        if (physical != null) {
+            try {
+                InetAddress[] answers=physical.getAllByName(host);
+                for(InetAddress answer:answers)
+                    if(answer instanceof java.net.Inet4Address)return answers;
+                physicalError=new UnknownHostException("物理网络未返回 IPv4 地址");
+            }
+            catch (Exception error) { physicalError = error; }
+        }
+        // Some domestic resolvers refuse a node hostname even though the
+        // already-running tunnel can resolve it. Use the tunnel resolver only
+        // as a lookup fallback; the actual entry probe is still protected and
+        // bound to the physical network by prepareProbeSocket().
+        try { return InetAddress.getAllByName(host); }
+        catch (Exception tunnelError) {
+            if (physicalError != null) throw physicalError;
+            throw tunnelError;
+        }
     }
 
     static void prepareProbeSocket(Socket socket) throws Exception {
