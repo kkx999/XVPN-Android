@@ -1,9 +1,9 @@
-# XVPN Android v1.0.0-rc4 测试清单
+# XVPN Android v1.0.0-rc5 测试清单
 
 ## 源码与构建门槛
 
 - [x] Application ID = `com.xvpn.android`
-- [x] `versionName = 1.0.0-rc4`，`versionCode = 10021`
+- [x] `versionName = 1.0.0-rc5`，`versionCode = 10022`
 - [x] 仅打包 `arm64-v8a/libbox.so`，libbox 版本固定为 1.13.19
 - [x] libbox AAR 与两份本地 SRS 规则均有固定 SHA-256，GitHub Actions 会在编译前核对
 - [x] 每次首次连接和已连接热切换都会先执行 libbox `checkConfig`
@@ -19,7 +19,7 @@
 ## 安装、浅色与深色
 
 - [ ] GitHub Actions `Build XVPN Android` 完整成功
-- [ ] `XVPN-v1.0.0-rc4.apk` 证书 SHA-256 与 `SIGNING_CERT_SHA256.txt` 一致
+- [ ] `XVPN-v1.0.0-rc5.apk` 证书 SHA-256 与 `SIGNING_CERT_SHA256.txt` 一致
 - [ ] “延迟测试网站”可保存裸域名、HTTP 或 HTTPS 地址；保存后返回设置页显示新域名，重启 App 后仍保留；无效地址明确提示且不改写旧值
 - [ ] 可从 RC1 覆盖安装，登录、主题、已选节点与分流偏好保留
 - [x] RC2 以 `https://xvpn.666101.xyz` 建立新的内置地址基线；后续内置地址迁移不会改写自定义 Panel 地址

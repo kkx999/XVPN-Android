@@ -4,13 +4,13 @@ XVPN 私人 VPN Android 客户端。
 
 ## 当前版本
 
-`v1.0.0-rc4`（`versionCode 10021`）
+`v1.0.0-rc5`（`versionCode 10022`）
 
-1.0.0-rc4 基于 RC3 真机反馈修复特定出口 DNS、已连接入口测速和窄屏显示比例，Application ID、固定签名链和 sing-box/libbox 1.13.19 数据面保持不变；发布 APK 前仍须完成 `QA_CHECKLIST.md` 的真机协议验收。
+1.0.0-rc5 基于 RC3 真机反馈修复特定出口 DNS、已连接入口测速和窄屏显示比例，并修复 RC4 的 Java 编译阻断；Application ID、固定签名链和 sing-box/libbox 1.13.19 数据面保持不变。发布 APK 前仍须完成 `QA_CHECKLIST.md` 的真机协议验收。
 
 变更摘要见 [RELEASE_NOTES.md](RELEASE_NOTES.md)，逐项验收见 [QA_CHECKLIST.md](QA_CHECKLIST.md)。
 
-## 1.0.0-rc4 主要变化
+## 1.0.0-rc5 主要变化
 
 - 智能分流内置版本固定、带 SHA-256 校验的 SagerNet `geosite-geolocation-cn` 与 `geoip-cn` 二进制规则；私网、本地域名与中国域名/IP 直连，其余流量走当前节点。全局代理仍保留局域网直连，所有公网流量走节点。
 - 不照搬 Quantumult X 专有 rewrite 或广告规则；采用“本地优先、国内直连、最终代理”的可维护分流顺序，并只拒绝网页 UDP/443，使不支持 QUIC 的节点能立即回落 TCP/TLS，其他 UDP 流量不受影响。
@@ -30,10 +30,10 @@ XVPN 私人 VPN Android 客户端。
 
 ## 当前测试边界
 
-- CPU：1.0.0-rc4 仅包含 `arm64-v8a`，用于当前 arm64 Android 16 真机及同架构设备。
+- CPU：1.0.0-rc5 仅包含 `arm64-v8a`，用于当前 arm64 Android 16 真机及同架构设备。
 - 系统：Android 8.0+（minSdk 26），target / compileSdk 36。
 - 流量：`TrafficStats` 是 App/Core UID 的代理侧统计，适合产品展示与 Panel 汇总，不是防篡改计费依据。
-- 仍需真机验证各节点协议、Wi-Fi / 蜂窝切换、长时间锁屏、分流覆盖、DNS 检测以及各厂商通知栏样式。测试版本号为 1.0.0-rc4 不等于 APK 已通过这些设备项目，正式 Release 应保存完整验收记录。
+- 仍需真机验证各节点协议、Wi-Fi / 蜂窝切换、长时间锁屏、分流覆盖、DNS 检测以及各厂商通知栏样式。测试版本号为 1.0.0-rc5 不等于 APK 已通过这些设备项目，正式 Release 应保存完整验收记录。
 
 ## GitHub Actions 编译
 
@@ -42,7 +42,7 @@ XVPN 私人 VPN Android 客户端。
 1. 按 [SIGNING_SETUP.md](SIGNING_SETUP.md) 配置四个固定 Release 签名 Secrets。
 2. 将本目录内容上传到 GitHub 仓库根目录。
 3. 打开 `Actions` 运行 `Build XVPN Android`，或 push 到 `main`。
-4. 下载 Artifact `XVPN-v1.0.0-rc4`，其中包含 APK 与 `SHA256SUMS.txt`。
+4. 下载 Artifact `XVPN-v1.0.0-rc5`，其中包含 APK 与 `SHA256SUMS.txt`。
 
 工作流会核对应用 ID、版本、libbox AAR、内置分流规则校验值、固定签名证书、APK 包名与 `arm64-v8a` ABI。后续 APK 必须继续使用当前固定签名并递增 `versionCode`。
 

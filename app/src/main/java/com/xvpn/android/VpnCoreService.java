@@ -54,6 +54,7 @@ import java.net.HttpURLConnection;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.net.UnknownHostException;
 import java.net.URL;
 import java.security.KeyStore;
 import java.security.cert.Certificate;

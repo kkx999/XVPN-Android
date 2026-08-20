@@ -1,6 +1,8 @@
-# XVPN Android 1.0.0-rc4
+# XVPN Android 1.0.0-rc5
 
-第四个正式版候选源码，针对 RC3 真机反馈做兼容性与稳定性修复。
+- 修复 RC4 `VpnCoreService` 漏导入 `UnknownHostException` 导致的 release Java 编译失败。
+
+第五个正式版候选源码，针对 RC3 真机反馈做兼容性与稳定性修复，并包含 RC4 编译修复。
 
 ## 网络与稳定性
 
