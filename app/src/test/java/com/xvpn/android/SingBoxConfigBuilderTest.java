@@ -69,8 +69,11 @@ public final class SingBoxConfigBuilderTest {
         assertFalse(servers.getJSONObject(0).has("detour"));
         assertEquals("proxy", servers.getJSONObject(1).getString("detour"));
 
-        JSONObject quicReject = findRule(root.getJSONObject("route").getJSONArray("rules"),
-                "network", "udp");
+        JSONObject quicReject = findRule(
+                root.getJSONObject("route").getJSONArray("rules"),
+                "network",
+                "udp"
+        );
         assertNotNull(quicReject);
         assertEquals(443, quicReject.getInt("port"));
         assertEquals("reject", quicReject.getString("action"));
@@ -79,9 +82,11 @@ public final class SingBoxConfigBuilderTest {
     private static void assertRoutingMode(JSONObject root, RouteMode mode) throws Exception {
         JSONObject route = root.getJSONObject("route");
         assertEquals("proxy", route.getString("final"));
+
         JSONArray rules = route.getJSONArray("rules");
         boolean hasGeosite = hasRuleSet(rules, "geosite-cn");
         boolean hasGeoip = hasRuleSet(rules, "geoip-cn");
+
         if (mode == RouteMode.SMART) {
             assertTrue(hasGeosite);
             assertTrue(hasGeoip);
@@ -91,10 +96,16 @@ public final class SingBoxConfigBuilderTest {
         }
     }
 
-    private static JSONObject findRule(JSONArray rules, String key, String value) throws Exception {
+    private static JSONObject findRule(
+            JSONArray rules,
+            String key,
+            String value
+    ) throws Exception {
         for (int i = 0; i < rules.length(); i++) {
             JSONObject rule = rules.getJSONObject(i);
-            if (value.equals(rule.optString(key))) return rule;
+            if (value.equals(rule.optString(key))) {
+                return rule;
+            }
         }
         return null;
     }
@@ -102,41 +113,92 @@ public final class SingBoxConfigBuilderTest {
     private static boolean hasRuleSet(JSONArray rules, String tag) throws Exception {
         for (int i = 0; i < rules.length(); i++) {
             JSONArray values = rules.getJSONObject(i).optJSONArray("rule_set");
-            if (values == null) continue;
-            for (int j = 0; j < values.length(); j++) if (tag.equals(values.getString(j))) return true;
+            if (values == null) {
+                continue;
+            }
+
+            for (int j = 0; j < values.length(); j++) {
+                if (tag.equals(values.getString(j))) {
+                    return true;
+                }
+            }
         }
         return false;
     }
 
-    private static List<Sample> samples() {
+    private static List<Sample> samples() throws Exception {
         List<Sample> values = new ArrayList<>();
-        values.add(new Sample("vless", "vless://" + UUID
-                + "@example.com:443?security=tls&sni=example.com&type=ws&host=example.com&path=%2Fws"));
-        values.add(new Sample("trojan",
-                "trojan://password@example.com:443?security=tls&sni=example.com&type=grpc&serviceName=xvpn"));
+
+        values.add(new Sample(
+                "vless",
+                "vless://" + UUID
+                        + "@example.com:443?security=tls&sni=example.com"
+                        + "&type=ws&host=example.com&path=%2Fws"
+        ));
+
+        values.add(new Sample(
+                "trojan",
+                "trojan://password@example.com:443"
+                        + "?security=tls&sni=example.com"
+                        + "&type=grpc&serviceName=xvpn"
+        ));
 
         String vmess = new JSONObject()
-                .put("v", "2").put("add", "example.com").put("port", "443")
-                .put("id", UUID).put("aid", "0").put("scy", "auto")
-                .put("net", "ws").put("host", "example.com").put("path", "/ws")
-                .put("tls", "tls").put("sni", "example.com").toString();
-        values.add(new Sample("vmess", "vmess://" + Base64.getEncoder()
-                .encodeToString(vmess.getBytes(StandardCharsets.UTF_8))));
+                .put("v", "2")
+                .put("add", "example.com")
+                .put("port", "443")
+                .put("id", UUID)
+                .put("aid", "0")
+                .put("scy", "auto")
+                .put("net", "ws")
+                .put("host", "example.com")
+                .put("path", "/ws")
+                .put("tls", "tls")
+                .put("sni", "example.com")
+                .toString();
 
-        values.add(new Sample("shadowsocks",
-                "ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ=@example.com:443#XVPN"));
-        values.add(new Sample("hysteria2",
-                "hysteria2://password@example.com:443?sni=example.com&insecure=1&obfs=salamander&obfs-password=test"));
-        values.add(new Sample("tuic", "tuic://" + UUID
-                + ":password@example.com:443?sni=example.com&allow_insecure=1&congestion_control=bbr"));
-        values.add(new Sample("anytls",
-                "anytls://password@example.com:443?sni=example.com&insecure=1"));
+        values.add(new Sample(
+                "vmess",
+                "vmess://" + Base64.getEncoder()
+                        .encodeToString(vmess.getBytes(StandardCharsets.UTF_8))
+        ));
+
+        values.add(new Sample(
+                "shadowsocks",
+                "ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ=@example.com:443#XVPN"
+        ));
+
+        values.add(new Sample(
+                "hysteria2",
+                "hysteria2://password@example.com:443"
+                        + "?sni=example.com&insecure=1"
+                        + "&obfs=salamander&obfs-password=test"
+        ));
+
+        values.add(new Sample(
+                "tuic",
+                "tuic://" + UUID
+                        + ":password@example.com:443"
+                        + "?sni=example.com&allow_insecure=1"
+                        + "&congestion_control=bbr"
+        ));
+
+        values.add(new Sample(
+                "anytls",
+                "anytls://password@example.com:443"
+                        + "?sni=example.com&insecure=1"
+        ));
+
         return values;
     }
 
     private static final class Sample {
         final String type;
         final String uri;
-        Sample(String type, String uri) { this.type = type; this.uri = uri; }
+
+        Sample(String type, String uri) {
+            this.type = type;
+            this.uri = uri;
+        }
     }
 }
