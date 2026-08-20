@@ -67,7 +67,10 @@ import java.util.concurrent.Future;
 
 public final class MainActivity extends android.app.Activity {
     private static final String PREFS = "xvpn_preferences_v1";
+    private static final String PREF_BASE_URL = "base_url";
+    private static final String PREF_MANAGED_PANEL_BASE = "managed_panel_base_v1";
     private static final String DEFAULT_BASE_URL = ApiClient.DEFAULT_PANEL_BASE;
+    private static final String RETIRED_DEFAULT_LATENCY_URL = "https://www.gstatic.com/generate_204";
     private static final String DEFAULT_LATENCY_URL = "http://www.apple.com/library/test/success.html";
     private static final int TAB_HOME = 0;
     private static final int TAB_MINE = 1;
@@ -143,11 +146,8 @@ public final class MainActivity extends android.app.Activity {
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
-        baseUrl = ApiClient.migratePanelBase(prefs.getString("base_url", DEFAULT_BASE_URL));
-        if (!ApiClient.isValidPanelBase(baseUrl)) baseUrl = DEFAULT_BASE_URL;
-        // VpnCoreService runs independently and reads this normalized endpoint
-        // when it reports the current session's cumulative traffic.
-        prefs.edit().putString("base_url", baseUrl).apply();
+        migrateLatencyTargetPreference();
+        baseUrl = loadManagedPanelBase();
         token = SecureTokenStore.load(prefs);
         routeMode = RouteMode.fromKey(prefs.getString("route_mode", "smart"));
         if(savedInstanceState!=null){
@@ -160,6 +160,39 @@ public final class MainActivity extends android.app.Activity {
         refreshPalette();
         applySystemBars();
         showLaunchTransition();
+    }
+
+    /** Move only the previous built-in value to the new Apple default. */
+    private void migrateLatencyTargetPreference() {
+        String stored=prefs.getString("latency_test_url",null);
+        String normalized=stored==null?"":stored.trim();
+        if(normalized.isEmpty()||RETIRED_DEFAULT_LATENCY_URL.equalsIgnoreCase(normalized)){
+            prefs.edit().putString("latency_test_url",DEFAULT_LATENCY_URL).apply();
+        }
+    }
+
+    /**
+     * Establishes 1.0.0-rc2 as the first managed built-in Panel endpoint.
+     * Builds before this marker deliberately start from the current endpoint;
+     * after that, only users who keep the built-in address are migrated when
+     * the compiled default changes. A user-entered Panel is never overwritten.
+     */
+    private String loadManagedPanelBase() {
+        boolean managed = !prefs.contains(PREF_MANAGED_PANEL_BASE)
+                || prefs.getBoolean(PREF_MANAGED_PANEL_BASE, true);
+        String stored = ApiClient.normalizePanelBase(prefs.getString(PREF_BASE_URL, ""));
+        String resolved;
+        if (managed || !ApiClient.isValidPanelBase(stored)) {
+            resolved = DEFAULT_BASE_URL;
+            managed = true;
+        } else {
+            resolved = stored;
+        }
+        // VpnCoreService runs independently and reads this normalized endpoint
+        // when it reports the current session's cumulative traffic.
+        prefs.edit().putString(PREF_BASE_URL, resolved)
+                .putBoolean(PREF_MANAGED_PANEL_BASE, managed).apply();
+        return resolved;
     }
 
     @Override protected void onSaveInstanceState(Bundle outState){
@@ -551,27 +584,38 @@ public final class MainActivity extends android.app.Activity {
     }
 
     private JSONObject fetchBootstrapCompat(String authToken, JSONObject loginUser) throws Exception {
+        ApiClient.ApiException bootstrapFailure=null;
         try {
             return ApiClient.request(baseUrl, "/app/bootstrap", "GET", authToken, null);
         } catch (ApiClient.ApiException e) {
-            // /app/bootstrap is the v1.2 preferred path. Keep a narrow fallback for Panels
-            // that are still completing an older API migration, without masking auth errors.
-            if (e.status != 404 && e.status != 405) throw e;
+            // Keep the older /me + /nodes composition for a missing bootstrap endpoint,
+            // and for a transient endpoint-specific 5xx. Authentication failures and
+            // normal API validation failures must never be masked by this fallback.
+            boolean compatFallback=e.status==404||e.status==405||(e.status>=500&&e.status<=599);
+            if(!compatFallback||e.isAuthFailure())throw e;
+            bootstrapFailure=e;
         }
 
-        JSONObject me = ApiClient.request(baseUrl, "/me", "GET", authToken, null);
-        JSONObject nodes = ApiClient.request(baseUrl, "/nodes", "GET", authToken, null);
-        JSONObject boot = new JSONObject();
-        boot.put("ok", true);
-        boot.put("api", "v1");
-        boot.put("version", "compat");
-        JSONObject meUser = me.optJSONObject("user");
-        boot.put("user", meUser != null ? meUser : (loginUser != null ? loginUser : new JSONObject()));
-        JSONObject nestedNodes = new JSONObject();
-        nestedNodes.put("total", nodes.optInt("total", 0));
-        nestedNodes.put("countries", nodes.optJSONArray("countries"));
-        boot.put("nodes", nestedNodes);
-        return boot;
+        try {
+            JSONObject me = ApiClient.request(baseUrl, "/me", "GET", authToken, null);
+            JSONObject nodes = ApiClient.request(baseUrl, "/nodes", "GET", authToken, null);
+            JSONObject boot = new JSONObject();
+            boot.put("ok", true);
+            boot.put("api", "v1");
+            boot.put("version", "compat");
+            JSONObject meUser = me.optJSONObject("user");
+            boot.put("user", meUser != null ? meUser : (loginUser != null ? loginUser : new JSONObject()));
+            JSONObject nestedNodes = new JSONObject();
+            nestedNodes.put("total", nodes.optInt("total", 0));
+            nestedNodes.put("countries", nodes.optJSONArray("countries"));
+            boot.put("nodes", nestedNodes);
+            return boot;
+        } catch (Exception compatFailure) {
+            // The primary 5xx is usually the clearest diagnosis if both API
+            // shapes fail. For 404/405 keep the compatibility error instead.
+            if(bootstrapFailure!=null&&bootstrapFailure.status>=500)throw bootstrapFailure;
+            throw compatFailure;
+        }
     }
 
     private void performRegister(EditText invite, EditText user, EditText pass, EditText confirm, Button button, ProgressBar busy) {
@@ -777,7 +821,7 @@ private void setRouteMode(RouteMode mode) {
             activeNode=catalog.find(core.nodeId);
             if(activeNode==null){toast("当前连接节点已不在列表中，请先刷新节点");return;}
             try{reloadConfig=SingBoxConfigBuilder.build(this,activeNode,mode).toString();}
-            catch(Exception e){toast(e.getMessage()==null?"分流配置暂不可用":e.getMessage());return;}
+            catch(Exception e){toast(apiMessage(e));return;}
         }
         final String preparedConfig=reloadConfig;
         final NodeCatalog.Node connectedNode=activeNode;
@@ -1108,7 +1152,7 @@ private void setRouteMode(RouteMode mode) {
             if(notificationManager!=null&&!notificationManager.areNotificationsEnabled())
                 toast("连接状态通知未开启，可在“我的”中随时开启");
             continuePendingCoreAuthorization();
-        } catch(Exception e) { toast(e.getMessage()==null?"节点配置暂不可用":e.getMessage()); }
+        } catch(Exception e) { toast(apiMessage(e)); }
     }
 
     private void continuePendingCoreAuthorization() {
@@ -1190,7 +1234,12 @@ private void setRouteMode(RouteMode mode) {
                 String nodeMeta=n.region==null||n.region.isEmpty()?n.protocol.toUpperCase(Locale.ROOT):(n.region+" · "+n.protocol.toUpperCase(Locale.ROOT)); info.addView(text(nodeMeta,10,p.muted,false),matchWrap()); item.addView(info,new LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1f));
                 long ms=savedLatency(n); boolean udpOnly=isUdpOnlyNode(n); TextView badge=text(udpOnly?"需连接":ms>0?(ms+" ms"):"—",10,udpOnly?p.warningText:ms>0?latencyColor(ms):p.subtle,true); badge.setGravity(Gravity.CENTER); badge.setPadding(dp(9),dp(6),dp(9),dp(6)); badge.setBackground(roundRect(p.surface,13,0,0)); item.addView(badge,wrapWrap()); latencyBadges.put(n.id,badge); gapH(item,7);
                 SelectionDotView tail=new SelectionDotView(this,p.accent,p.subtle,chosen); item.addView(tail,new LinearLayout.LayoutParams(dp(30),dp(30))); tails.put(n.id,tail); items.put(n.id,item); pressMotion(item,.988f);
-                item.setOnClickListener(v->{v.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);dialog.dismiss();v.postDelayed(()->showNodeDetail(n),motionEnabled()?185:0);}); body.addView(item,matchWrap()); gap(body,7);
+                item.setOnClickListener(v->{
+                    if(nodeScanRunning){toast("节点优选正在进行，请稍候…");return;}
+                    v.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+                    dialog.dismiss();
+                    v.postDelayed(()->showNodeDetail(n),motionEnabled()?185:0);
+                }); body.addView(item,matchWrap()); gap(body,7);
             }
             body.setVisibility(collapsed?View.GONE:View.VISIBLE); block.addView(body,matchWrap());
             head.setOnClickListener(v->{
@@ -1282,7 +1331,7 @@ private void setRouteMode(RouteMode mode) {
             toast("正在切换至 "+node.name+"…");
             return true;
         }catch(Exception e){
-            toast(e.getMessage()==null?"节点配置暂不可用":e.getMessage());
+            toast(apiMessage(e));
             return false;
         }
     }
@@ -1351,7 +1400,7 @@ private void setRouteMode(RouteMode mode) {
         SingBoxConfigBuilder.Endpoint endpoint=SingBoxConfigBuilder.endpoint(node);
         if(!endpoint.tcpProbeSupported){
             CoreState.Snapshot core=CoreState.read(this);
-            if(core.state==CoreState.RUNNING&&core.nodeId==node.id)return measureHttpLatency(prefs.getString("latency_test_url",DEFAULT_LATENCY_URL));
+            if(core.state==CoreState.RUNNING&&core.nodeId==node.id)return measureHttpLatency(latencyTestUrl());
             throw new UdpProbeUnavailableException();
         }
         long start=System.nanoTime();
@@ -1411,15 +1460,20 @@ private void setRouteMode(RouteMode mode) {
     }
 
     private String latencyTargetLabel() {
-        String url=prefs.getString("latency_test_url",DEFAULT_LATENCY_URL);
+        String url=latencyTestUrl();
         try { return new URL(url).getHost(); } catch(Exception ignored) { return "Apple"; }
+    }
+
+    private String latencyTestUrl() {
+        String candidate=normalizeLatencyUrl(prefs.getString("latency_test_url",DEFAULT_LATENCY_URL));
+        return candidate==null?DEFAULT_LATENCY_URL:candidate;
     }
 
     private void showLatencyTargetSettings() {
         Dialog dialog=bottomDialog(); LinearLayout sheet=sheet();
         sheet.addView(text("延迟测试网站",21,p.ink,true),matchWrap()); gap(sheet,5);
         sheet.addView(text("用于当前隧道的 HTTP/HTTPS 连通性测试；普通节点延迟仍以节点入口 TCP 握手为准。",12,p.muted,false),matchWrap()); gap(sheet,14);
-        EditText url=input("https://example.com",false); url.setText(prefs.getString("latency_test_url",DEFAULT_LATENCY_URL)); url.setInputType(InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_VARIATION_URI); sheet.addView(url,matchWrap());
+        EditText url=input("https://example.com",false); url.setText(latencyTestUrl()); url.setInputType(InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_VARIATION_URI); sheet.addView(url,matchWrap());
         gap(sheet,10);
         TextView status=text("默认：Apple success.html",11,p.muted,false); sheet.addView(status,matchWrap()); gap(sheet,14);
         LinearLayout actions=row(); Button test=secondaryButton("测试网站"); Button save=primaryButton("保存"); actions.addView(test,new LinearLayout.LayoutParams(0,dp(52),1f)); gapH(actions,10); actions.addView(save,new LinearLayout.LayoutParams(0,dp(52),1f)); sheet.addView(actions,matchWrap()); gap(sheet,8);
@@ -1503,7 +1557,11 @@ private void setRouteMode(RouteMode mode) {
         c.setRequestProperty("Accept-Language","zh-CN,zh;q=0.9,en;q=0.8");
         c.setRequestProperty("X-XVPN-Client","android/"+BuildConfig.VERSION_NAME);
         long start=System.nanoTime();
-        try { c.getResponseCode(); return Math.max(1,(System.nanoTime()-start)/1_000_000L); }
+        try {
+            int status=c.getResponseCode();
+            if(status<200||status>=400)throw new java.io.IOException("测试网站返回 HTTP "+status);
+            return Math.max(1,(System.nanoTime()-start)/1_000_000L);
+        }
         finally { c.disconnect(); }
     }
 
@@ -1516,7 +1574,17 @@ private void setRouteMode(RouteMode mode) {
         LinearLayout actions=row(); Button test=secondaryButton("测试连接"); Button save=primaryButton("保存"); actions.addView(test,new LinearLayout.LayoutParams(0,dp(52),1f)); gapH(actions,10); actions.addView(save,new LinearLayout.LayoutParams(0,dp(52),1f)); sheet.addView(actions,matchWrap()); gap(sheet,9);
         TextView reset=text("恢复默认地址",12,p.accent,true); reset.setGravity(Gravity.CENTER); reset.setPadding(dp(8),dp(10),dp(8),dp(8)); sheet.addView(reset,matchWrap());
         test.setOnClickListener(v->{ String candidate=ApiClient.normalizePanelBase(url.getText().toString()); if(!validServerCandidate(candidate)){return;} test.setEnabled(false); status.setText("正在测试…"); io.execute(()->{ try{ JSONObject h=ApiClient.request(candidate,"/health","GET",null,null); runOnUiThread(()->{test.setEnabled(true);status.setText("连接成功 · Panel "+h.optString("version",""));status.setTextColor(p.success);}); }catch(Exception e){runOnUiThread(()->{test.setEnabled(true);status.setText(apiMessage(e));status.setTextColor(p.warningText);});} }); });
-        save.setOnClickListener(v->{ String candidate=ApiClient.normalizePanelBase(url.getText().toString()); if(!validServerCandidate(candidate))return; boolean changed=!candidate.equals(baseUrl); baseUrl=candidate; prefs.edit().putString("base_url",baseUrl).apply(); if(changed){ clearSessionLocal(); dialog.dismiss(); showLogin("服务器地址已更新，请重新登录"); } else { dialog.dismiss(); toast("地址已保存"); } });
+        save.setOnClickListener(v->{
+            String candidate=ApiClient.normalizePanelBase(url.getText().toString());
+            if(!validServerCandidate(candidate))return;
+            boolean changed=!candidate.equals(baseUrl);
+            baseUrl=candidate;
+            boolean useManagedDefault=DEFAULT_BASE_URL.equalsIgnoreCase(baseUrl);
+            prefs.edit().putString(PREF_BASE_URL,baseUrl)
+                    .putBoolean(PREF_MANAGED_PANEL_BASE,useManagedDefault).apply();
+            if(changed){ clearSessionLocal(); dialog.dismiss(); showLogin("服务器地址已更新，请重新登录"); }
+            else { dialog.dismiss(); toast("地址已保存"); }
+        });
         reset.setOnClickListener(v->{ url.setText(DEFAULT_BASE_URL); url.setSelection(url.length()); });
         showBottomDialog(dialog,sheet);
     }
@@ -1571,7 +1639,21 @@ private void setRouteMode(RouteMode mode) {
     }
 
     private String apiMessage(Exception e) {
-        if(e instanceof ApiClient.ApiException){ApiClient.ApiException a=(ApiClient.ApiException)e;if("RATE_LIMITED".equals(a.code)&&a.retryAfter>0)return a.getMessage()+"（约 "+a.retryAfter+" 秒）";return a.getMessage();} return e.getMessage()==null?"操作失败，请稍后重试":e.getMessage();
+        if(e instanceof ApiClient.ApiException){
+            ApiClient.ApiException a=(ApiClient.ApiException)e;
+            if("RATE_LIMITED".equals(a.code)&&a.retryAfter>0)return a.getMessage()+"（约 "+a.retryAfter+" 秒）";
+            return a.getMessage();
+        }
+        String message=e==null?"":e.getMessage();
+        String lower=message==null?"":message.trim().toLowerCase(Locale.ROOT);
+        if(lower.startsWith("<!doctype")||lower.startsWith("<html")||lower.contains("<body")||lower.contains("</html>")){
+            return "服务器暂时异常，请稍后重试";
+        }
+        if(message==null||message.trim().isEmpty())return "操作失败，请稍后重试";
+        if(lower.contains("://")||lower.contains("password")||lower.contains("uuid")||lower.contains("token")){
+            return "节点配置暂不可用，请刷新后重试";
+        }
+        return message.length()>240?"操作失败，请稍后重试":message;
     }
 
     private void showInfoSheet(String title,String body,String buttonText) {
@@ -1585,8 +1667,9 @@ private void setRouteMode(RouteMode mode) {
         nodeScanRunning=true; beginScanAction(action); status.setVisibility(View.VISIBLE); status.setTextColor(p.muted);
         String scanToken=token;
         if(CoreState.read(this).state==CoreState.RUNNING){
-            status.setText("将逐个真实切换验证节点，请勿退出…");
-            runConnectedBestNodeScanInPicker(dialog,action,status,latencyBadges,tails,items,pickerChanged,nodes,scanToken);
+            String healthTarget=latencyTestUrl();
+            status.setText("将使用 "+latencyHostLabel(healthTarget)+" 逐个真实验证节点，请勿退出…");
+            runConnectedBestNodeScanInPicker(dialog,action,status,latencyBadges,tails,items,pickerChanged,nodes,scanToken,healthTarget);
             return;
         }
 
@@ -1617,7 +1700,8 @@ private void setRouteMode(RouteMode mode) {
                                                    SparseArray<TextView> latencyBadges,
                                                    SparseArray<SelectionDotView> tails,
                                                    SparseArray<View> items, boolean[] pickerChanged,
-                                                   List<NodeCatalog.Node> nodes, String scanToken) {
+                                                   List<NodeCatalog.Node> nodes, String scanToken,
+                                                   String healthTarget) {
         io.execute(()->{
             List<NodeProbeResult> results=new ArrayList<>();
             CoreState.Snapshot initialState=CoreState.read(this);
@@ -1625,13 +1709,13 @@ private void setRouteMode(RouteMode mode) {
             int completed=0;
 
             if(current!=null){
-                VpnCoreService.TunnelHealth health=VpnCoreService.checkTunnelHealthNow();
+                VpnCoreService.TunnelHealth health=VpnCoreService.checkTunnelHealthNow(healthTarget);
                 NodeProbeResult currentResult=health.healthy
                         ?NodeProbeResult.success(current,health.latencyMs)
-                        :NodeProbeResult.failure(current,new NodeProbeException("隧道异常",null));
+                        :NodeProbeResult.failure(current,new NodeProbeException("测试网址异常",null));
                 results.add(currentResult);
                 completed++;
-                showPickerProbeResult(dialog,status,latencyBadges,currentResult,completed,nodes.size(),"当前隧道");
+                showPickerProbeResult(dialog,status,latencyBadges,currentResult,completed,nodes.size(),"当前测试网址");
             }
 
             for(NodeCatalog.Node candidate:nodes){
@@ -1640,30 +1724,31 @@ private void setRouteMode(RouteMode mode) {
                 runOnUiThread(()->{
                     if(dialog.isShowing())status.setText("正在真实验证 "+nextCompleted+" / "+nodes.size()+" · "+candidate.name);
                 });
-                NodeProbeResult result=measureConnectedCandidate(candidate);
+                NodeProbeResult result=measureConnectedCandidate(candidate,healthTarget);
                 results.add(result);
                 completed++;
                 showPickerProbeResult(dialog,status,latencyBadges,result,completed,nodes.size(),"真实验证");
             }
 
-            NodeCatalog.Node winner=bestNode(results);
-            long winnerMs=bestLatency(results);
-            boolean winnerActive=winner!=null&&CoreState.read(this).state==CoreState.RUNNING
-                    &&CoreState.read(this).nodeId==winner.id;
-            if(winner!=null&&!winnerActive){
-                final NodeCatalog.Node candidateWinner=winner;
+            // A node may pass during the scan but fail its final reconnect.
+            // Mark that attempt as failed and continue with the next measured
+            // candidate instead of discarding every verified fallback.
+            NodeProbeResult winnerResult=bestProbeResult(results);
+            while(winnerResult!=null){
+                NodeCatalog.Node candidateWinner=winnerResult.node;
+                CoreState.Snapshot core=CoreState.read(this);
+                boolean winnerActive=core.state==CoreState.RUNNING&&core.nodeId==candidateWinner.id;
+                if(winnerActive)break;
                 runOnUiThread(()->{
                     if(dialog.isShowing())status.setText("正在保留最快节点 · "+candidateWinner.name);
                 });
-                NodeProbeResult restored=measureConnectedCandidate(candidateWinner);
-                if(restored.error!=null){
-                    winner=null;
-                    winnerMs=0L;
-                }
+                NodeProbeResult restored=measureConnectedCandidate(candidateWinner,healthTarget);
+                replaceProbeResult(results,restored);
+                winnerResult=restored.error==null?restored:bestProbeResult(results);
             }
 
-            final NodeCatalog.Node finalWinner=winner;
-            final long finalWinnerMs=winnerMs;
+            final NodeCatalog.Node finalWinner=winnerResult==null?null:winnerResult.node;
+            final long finalWinnerMs=winnerResult==null?0L:winnerResult.latencyMs;
             runOnUiThread(()->{
                 nodeScanRunning=false;
                 finishScanAction(action,finalWinner!=null);
@@ -1678,16 +1763,18 @@ private void setRouteMode(RouteMode mode) {
         });
     }
 
-    private NodeProbeResult measureConnectedCandidate(NodeCatalog.Node candidate) {
+    private NodeProbeResult measureConnectedCandidate(NodeCatalog.Node candidate,String healthTarget) {
         try{
             String config=SingBoxConfigBuilder.build(this,candidate,routeMode).toString();
-            VpnCoreService.reconfigure(this,config,candidate.id,candidate.name,routeMode.label);
-            if(!awaitRunningNode(candidate.id,9000L))throw new NodeProbeException("切换失败",null);
-            VpnCoreService.TunnelHealth health=VpnCoreService.checkTunnelHealthNow();
-            // The service has already passed an end-to-end health check before
-            // publishing RUNNING.  A second transient probe failure must not
-            // incorrectly reject a live candidate.
-            return NodeProbeResult.success(candidate,health.healthy?health.latencyMs:1800L);
+            VpnCoreService.reconfigure(this,config,candidate.id,candidate.name,routeMode.label,healthTarget);
+            if(!awaitRunningNode(candidate.id,25000L)){
+                CoreState.Snapshot state=CoreState.read(this);
+                String label=state.state==CoreState.RUNNING?"测试失败":"切换失败";
+                throw new NodeProbeException(label,null);
+            }
+            VpnCoreService.TunnelHealth health=VpnCoreService.lastTunnelHealthNow();
+            if(!health.healthy)throw new NodeProbeException("测试网址异常",null);
+            return NodeProbeResult.success(candidate,health.latencyMs);
         }catch(Exception error){
             return NodeProbeResult.failure(candidate,error instanceof NodeProbeException
                     ?error:new NodeProbeException("切换失败",error));
@@ -1695,13 +1782,17 @@ private void setRouteMode(RouteMode mode) {
     }
 
     private boolean awaitRunningNode(int nodeId,long timeoutMs) {
-        long deadline=SystemClock.elapsedRealtime()+timeoutMs;
+        long started=SystemClock.elapsedRealtime();
+        long deadline=started+timeoutMs;
+        long dispatchDeadline=Math.min(deadline,started+2000L);
         boolean observedSwitching=false;
         while(SystemClock.elapsedRealtime()<deadline){
             CoreState.Snapshot state=CoreState.read(this);
             if(state.state==CoreState.SWITCHING)observedSwitching=true;
-            if(state.state==CoreState.RUNNING&&state.nodeId==nodeId)return true;
-            if(observedSwitching&&state.state==CoreState.RUNNING&&state.nodeId!=nodeId)return false;
+            boolean switching=VpnCoreService.isSwitchInProgressNow();
+            if(state.state==CoreState.RUNNING&&state.nodeId==nodeId&&!switching)return true;
+            if(state.state==CoreState.RUNNING&&state.nodeId!=nodeId
+                    &&!switching&&(observedSwitching||SystemClock.elapsedRealtime()>=dispatchDeadline))return false;
             if(state.state==CoreState.ERROR||state.state==CoreState.STOPPED)return false;
             try{Thread.sleep(100L);}catch(InterruptedException interrupted){Thread.currentThread().interrupt();return false;}
         }
@@ -1728,6 +1819,21 @@ private void setRouteMode(RouteMode mode) {
             if(result.error==null&&result.latencyMs<bestMs){best=result.node;bestMs=result.latencyMs;}
         }
         return best;
+    }
+
+    private NodeProbeResult bestProbeResult(List<NodeProbeResult> results) {
+        NodeProbeResult best=null;
+        for(NodeProbeResult result:results){
+            if(result.error==null&&(best==null||result.latencyMs<best.latencyMs))best=result;
+        }
+        return best;
+    }
+
+    private void replaceProbeResult(List<NodeProbeResult> results,NodeProbeResult replacement) {
+        for(int i=0;i<results.size();i++){
+            if(results.get(i).node.id==replacement.node.id){results.set(i,replacement);return;}
+        }
+        results.add(replacement);
     }
 
     private long bestLatency(List<NodeProbeResult> results) {

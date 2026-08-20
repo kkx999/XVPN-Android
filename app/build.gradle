@@ -20,9 +20,11 @@ android {
         applicationId 'com.xvpn.android'
         minSdk 26
         targetSdk 36
-        versionCode 10018
-        versionName '1.0.0-rc'
-        manifestPlaceholders = [usesCleartextTraffic: 'false']
+        versionCode 10019
+        versionName '1.0.0-rc2'
+        // The user-selectable latency target supports Apple's HTTP success
+        // page. Panel API validation remains HTTPS-only in release builds.
+        manifestPlaceholders = [usesCleartextTraffic: 'true']
         // 1.0.0 remains arm64-only; the bundled libbox AAR is intentionally single-ABI.
         ndk { abiFilters 'arm64-v8a' }
     }
@@ -41,7 +43,8 @@ android {
     buildTypes {
         debug {
             // Debug can be used with a temporary HTTP Panel during local development.
-            // Official GitHub test APKs are release-signed and HTTPS-only.
+            // Panel API remains HTTPS-only in release; the HTTP allowance is
+            // solely for the user-selected latency target.
             manifestPlaceholders = [usesCleartextTraffic: 'true']
             applicationIdSuffix '.debug'
             versionNameSuffix '-debug'
@@ -49,7 +52,7 @@ android {
         release {
             signingConfig signingConfigs.release
             minifyEnabled false
-            manifestPlaceholders = [usesCleartextTraffic: 'false']
+            manifestPlaceholders = [usesCleartextTraffic: 'true']
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
     }

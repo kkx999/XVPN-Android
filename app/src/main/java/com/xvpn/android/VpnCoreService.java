@@ -84,6 +84,8 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
     private static final String EXTRA_NODE_ID = "node_id";
     private static final String EXTRA_NODE_NAME = "node_name";
     private static final String EXTRA_ROUTE_LABEL = "route_label";
+    private static final String EXTRA_HEALTH_TARGET = "health_target";
+    private static final String APP_PREFS = "xvpn_preferences_v1";
     // Keep the established channel identity so upgrades preserve the user's
     // notification preference instead of creating a duplicate channel.
     private static final String NOTIFICATION_CHANNEL = "xvpn_vpn_service";
@@ -108,6 +110,7 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
     private volatile String routeLabel = "智能分流";
     private volatile String sessionId = "";
     private volatile String activeConfig = "";
+    private volatile TunnelHealth lastTunnelHealth = TunnelHealth.failure("尚未完成联网检测");
 
     private ScheduledExecutorService metricsExecutor;
     private ScheduledExecutorService reportExecutor;
@@ -149,6 +152,32 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
         return service.probeTunnelOnce();
     }
 
+    /** Tests exactly the user-selected latency target through the live TUN. */
+    static TunnelHealth checkTunnelHealthNow(String target) {
+        VpnCoreService service = activeInstance;
+        if (service == null || CoreState.read(service).state != CoreState.RUNNING) {
+            return TunnelHealth.failure("VPN 尚未连接");
+        }
+        String safeTarget = normalizeHealthTarget(target);
+        if (safeTarget.isEmpty()) return TunnelHealth.failure("测试网址无效");
+        return service.probeTunnelOnce(new String[]{safeTarget});
+    }
+
+    /** Returns the verified health result that brought the current node to RUNNING. */
+    static TunnelHealth lastTunnelHealthNow() {
+        VpnCoreService service = activeInstance;
+        if (service == null || CoreState.read(service).state != CoreState.RUNNING) {
+            return TunnelHealth.failure("VPN 尚未连接");
+        }
+        return service.lastTunnelHealth;
+    }
+
+    /** Lets connected-state node selection wait until a rollback is fully idle. */
+    static boolean isSwitchInProgressNow() {
+        VpnCoreService service = activeInstance;
+        return service != null && service.switchInProgress.get();
+    }
+
     static void start(Context context, String config, int nodeId, String nodeName, String routeLabel) {
         Intent intent = new Intent(context, VpnCoreService.class)
                 .setAction(ACTION_START)
@@ -160,12 +189,22 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
     }
 
     static void reconfigure(Context context, String config, int nodeId, String nodeName, String routeLabel) {
+        reconfigure(context, config, nodeId, nodeName, routeLabel, "");
+    }
+
+    /**
+     * A non-empty target is used only for connected-state node selection.
+     * Normal connect and manual switching retain the fixed HTTPS health targets.
+     */
+    static void reconfigure(Context context, String config, int nodeId, String nodeName,
+                            String routeLabel, String healthTarget) {
         Intent intent = new Intent(context, VpnCoreService.class)
                 .setAction(ACTION_RECONFIGURE)
                 .putExtra(EXTRA_CONFIG, config)
                 .putExtra(EXTRA_NODE_ID, nodeId)
                 .putExtra(EXTRA_NODE_NAME, nodeName == null ? "" : nodeName)
-                .putExtra(EXTRA_ROUTE_LABEL, routeLabel == null ? "" : routeLabel);
+                .putExtra(EXTRA_ROUTE_LABEL, routeLabel == null ? "" : routeLabel)
+                .putExtra(EXTRA_HEALTH_TARGET, normalizeHealthTarget(healthTarget));
         context.startService(intent);
     }
 
@@ -198,6 +237,7 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
             int nextNodeId = intent.getIntExtra(EXTRA_NODE_ID, 0);
             String nextNodeName = value(intent.getStringExtra(EXTRA_NODE_NAME));
             String nextRouteLabel = value(intent.getStringExtra(EXTRA_ROUTE_LABEL));
+            String healthTarget = normalizeHealthTarget(intent.getStringExtra(EXTRA_HEALTH_TARGET));
             CoreState.Snapshot state = CoreState.read(this);
             if (commandServer == null || state.state != CoreState.RUNNING) return Service.START_NOT_STICKY;
             if (config == null || config.trim().isEmpty() || nextNodeId <= 0) return Service.START_NOT_STICKY;
@@ -206,7 +246,7 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
             updateForegroundNotification("XVPN 正在切换", "正在应用 "
                     + (nextRouteLabel.isEmpty() ? routeLabel : nextRouteLabel) + " · "
                     + (nextNodeName.isEmpty() ? "当前节点" : nextNodeName), false);
-            coreExecutor.execute(() -> reconfigureCore(config, nextNodeId, nextNodeName, nextRouteLabel));
+            coreExecutor.execute(() -> reconfigureCore(config, nextNodeId, nextNodeName, nextRouteLabel, healthTarget));
             return Service.START_NOT_STICKY;
         }
         if (!ACTION_START.equals(action) || intent == null) return Service.START_NOT_STICKY;
@@ -283,6 +323,7 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
                 throw new IllegalStateException("隧道已建立，但联网检测失败：" + health.error);
             }
 
+            lastTunnelHealth = health;
             activeConfig = config;
             CoreState.publishLifecycle(this, CoreState.RUNNING, nodeId, nodeName, "");
             updateForegroundNotification("XVPN 已连接", connectedNotificationText(0L, 0L), true);
@@ -294,7 +335,8 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
         }
     }
 
-    private void reconfigureCore(String config, int nextNodeId, String nextNodeName, String nextRouteLabel) {
+    private void reconfigureCore(String config, int nextNodeId, String nextNodeName, String nextRouteLabel,
+                                 String healthTarget) {
         final int previousNodeId = nodeId;
         final String previousNodeName = nodeName;
         final String previousRouteLabel = routeLabel;
@@ -331,11 +373,14 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
                 return;
             }
 
-            TunnelHealth health = waitForTunnelHealth();
+            TunnelHealth health = healthTarget.isEmpty()
+                    ? waitForTunnelHealth()
+                    : waitForTunnelHealth(healthTarget);
             if (!health.healthy) {
-                throw new IllegalStateException("新配置联网检测失败：" + health.error);
+                throw new IllegalStateException((healthTarget.isEmpty() ? "新配置联网检测失败：" : "测试网址不可访问：") + health.error);
             }
 
+            lastTunnelHealth = health;
             activeConfig = config;
             CoreState.publishLifecycle(this, CoreState.RUNNING, nodeId, nodeName, "");
             updateForegroundNotification("XVPN 已连接", connectedNotificationText(0L, 0L), true);
@@ -354,6 +399,7 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
                         if (!restored.healthy) {
                             throw new IllegalStateException("原连接恢复后仍无法联网：" + restored.error);
                         }
+                        lastTunnelHealth = restored;
                     }
                     nodeId = previousNodeId;
                     nodeName = previousNodeName;
@@ -451,17 +497,22 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
      * routing, the selected protocol and the remote egress together.
      */
     private TunnelHealth waitForInitialTunnelHealth() {
-        return waitForTunnelHealth(1);
+        return waitForTunnelHealth(defaultHealthTargets(), 1);
     }
 
     private TunnelHealth waitForTunnelHealth() {
-        return waitForTunnelHealth(2);
+        return waitForTunnelHealth(defaultHealthTargets(), 2);
     }
 
-    private TunnelHealth waitForTunnelHealth(int attempts) {
+    /** Exact custom target; used by connected-state automatic node selection only. */
+    private TunnelHealth waitForTunnelHealth(String target) {
+        return waitForTunnelHealth(new String[]{target}, 2);
+    }
+
+    private TunnelHealth waitForTunnelHealth(String[] targets, int attempts) {
         TunnelHealth last = TunnelHealth.failure("网络暂无响应");
         for (int attempt = 0; attempt < attempts && !stopRequested.get(); attempt++) {
-            last = probeTunnelOnce();
+            last = probeTunnelOnce(targets);
             if (last.healthy) return last;
             if (attempt + 1 < attempts) {
                 try { Thread.sleep(450L); }
@@ -475,10 +526,17 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
     }
 
     private TunnelHealth probeTunnelOnce() {
-        String[] targets = {
+        return probeTunnelOnce(defaultHealthTargets());
+    }
+
+    private String[] defaultHealthTargets() {
+        return new String[]{
                 "https://www.gstatic.com/generate_204",
                 "https://github.com/favicon.ico"
         };
+    }
+
+    private TunnelHealth probeTunnelOnce(String[] targets) {
         String lastError = "无法访问检测网站";
         for (String target : targets) {
             HttpURLConnection connection = null;
@@ -1048,6 +1106,23 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
     private void logCoreFailure(String stage, Throwable error) {
         if (BuildConfig.DEBUG) Log.e(TAG, stage, error);
         else Log.e(TAG, stage + ": " + friendlyCoreError(error));
+    }
+
+    private static String normalizeHealthTarget(String target) {
+        String candidate=value(target);
+        if(candidate.isEmpty()) return "";
+        if(!candidate.contains("://")) candidate="https://"+candidate;
+        try {
+            URL url=new URL(candidate);
+            String scheme=url.getProtocol();
+            if(!"http".equalsIgnoreCase(scheme)&&!"https".equalsIgnoreCase(scheme)) return "";
+            if(value(url.getHost()).isEmpty()||url.getUserInfo()!=null) return "";
+            int port=url.getPort();
+            if(port==0||port>65535) return "";
+            return url.toExternalForm();
+        } catch (Exception ignored) {
+            return "";
+        }
     }
 
     private static String value(String text) { return text == null ? "" : text.trim(); }

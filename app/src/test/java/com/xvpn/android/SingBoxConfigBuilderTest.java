@@ -40,18 +40,25 @@ public final class SingBoxConfigBuilderTest {
         }
     }
 
-    @Test public void panelMigrationChangesOnlyRetiredBuiltInAddress() {
-        assertEquals(ApiClient.DEFAULT_PANEL_BASE, ApiClient.migratePanelBase(""));
+    @Test public void panelBaseNormalizesApiSuffixWithoutChangingHost() {
         assertEquals(ApiClient.DEFAULT_PANEL_BASE,
-                ApiClient.migratePanelBase("https://xx.666101.xyz/api/v1/"));
+                ApiClient.normalizePanelBase(ApiClient.DEFAULT_PANEL_BASE + "/api/v1/"));
         assertEquals("https://panel.example.com",
-                ApiClient.migratePanelBase("https://panel.example.com/"));
+                ApiClient.normalizePanelBase("https://panel.example.com/"));
     }
 
     @Test public void stableReleaseWinsOverMatchingPrerelease() {
         assertTrue(AppUpdateChecker.compareVersions("1.0.0", "1.0.0-rc1") > 0);
+        assertTrue(AppUpdateChecker.compareVersions("1.0.0-rc2", "1.0.0-rc") > 0);
         assertTrue(AppUpdateChecker.compareVersions("1.0.1", "1.0.0") > 0);
         assertEquals(0, AppUpdateChecker.compareVersions("v1.0.0", "1.0.0"));
+    }
+
+    @Test public void rawHtmlServerFailureIsNeverShownToTheUser() {
+        assertEquals("服务器暂时异常，请稍后重试",
+                ApiClient.safeServerMessage(500, "<!doctype html><html><body>internal error</body></html>"));
+        assertEquals("接口地址不存在，请检查 Panel 配置", ApiClient.safeServerMessage(404, ""));
+        assertEquals("账户被暂停", ApiClient.safeServerMessage(400, "账户被暂停"));
     }
 
     private static void assertBaseNetworkProfile(JSONObject root) throws Exception {

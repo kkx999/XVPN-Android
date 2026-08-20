@@ -12,7 +12,6 @@ import java.nio.charset.StandardCharsets;
 
 final class ApiClient {
     static final String DEFAULT_PANEL_BASE = "https://xvpn.666101.xyz";
-    static final String LEGACY_PANEL_BASE = "https://xx.666101.xyz";
 
     private ApiClient() {}
 
@@ -48,13 +47,12 @@ final class ApiClient {
             } catch (Exception parse) {
                 json = new JSONObject();
                 json.put("ok", false);
-                json.put("message", text.isEmpty() ? ("HTTP " + status) : text);
             }
             if (status < 200 || status >= 300) {
                 throw new ApiException(
                         status,
                         json.optString("code", "HTTP_" + status),
-                        json.optString("message", "请求失败 (HTTP " + status + ")"),
+                        safeServerMessage(status, json.optString("message", "")),
                         json.optInt("retry_after", 0)
                 );
             }
@@ -86,15 +84,6 @@ final class ApiClient {
         if (base.endsWith("/api/v1")) base = base.substring(0, base.length() - "/api/v1".length());
         while (base.endsWith("/")) base = base.substring(0, base.length() - 1);
         return base;
-    }
-
-    /** Migrates only XVPN's retired built-in endpoint; user-defined Panels are never rewritten. */
-    static String migratePanelBase(String value) {
-        String normalized = normalizePanelBase(value);
-        if (normalized.isEmpty() || LEGACY_PANEL_BASE.equalsIgnoreCase(normalized)) {
-            return DEFAULT_PANEL_BASE;
-        }
-        return normalized;
     }
 
     static String apiBase(String panelBaseUrl) {
@@ -135,6 +124,21 @@ final class ApiClient {
         if (name.contains("SocketTimeout")) return "连接服务器超时，请稍后重试";
         if (name.contains("SSL")) return "HTTPS 安全连接失败，请检查证书";
         return "网络请求失败，请检查网络后重试";
+    }
+
+    /** Do not expose HTML proxy/server error pages in the Android UI. */
+    static String safeServerMessage(int status, String serverMessage) {
+        String message = serverMessage == null ? "" : serverMessage.trim();
+        String lower = message.toLowerCase(java.util.Locale.ROOT);
+        boolean html = lower.startsWith("<!doctype") || lower.startsWith("<html")
+                || lower.contains("<body") || lower.contains("</html>");
+        if (!message.isEmpty() && !html && message.length() <= 240) return message;
+        if (status == 401 || status == 403) return "登录状态已失效，请重新登录";
+        if (status == 404) return "接口地址不存在，请检查 Panel 配置";
+        if (status == 408 || status == 504) return "服务器响应超时，请稍后重试";
+        if (status == 429) return "请求过于频繁，请稍后重试";
+        if (status >= 500 && status <= 599) return "服务器暂时异常，请稍后重试";
+        return status > 0 ? "请求失败（HTTP " + status + "）" : "请求失败，请稍后重试";
     }
 
     static final class ApiException extends Exception {
