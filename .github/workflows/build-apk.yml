@@ -1,0 +1,176 @@
+name: Build XVPN Android
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build-release-apk:
+    name: Build signed release APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle 8.13
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.13'
+          cache-provider: basic
+
+      - name: Ensure Android SDK 36 is installed
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$(command -v sdkmanager || true)"
+          if [ -z "$SDKMANAGER" ]; then
+            SDKMANAGER="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          test -x "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "platforms;android-36" "build-tools;35.0.0"
+
+      - name: Read and verify app identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q "applicationId 'com.xvpn.android'" app/build.gradle
+
+          VERSION_CODE="$(sed -nE 's/^[[:space:]]*versionCode[[:space:]]+([0-9]+).*/\1/p' app/build.gradle | head -n1)"
+          VERSION_NAME="$(sed -nE "s/^[[:space:]]*versionName[[:space:]]+'([^']+)'.*/\1/p" app/build.gradle | head -n1)"
+
+          test -n "$VERSION_CODE" || { echo 'Unable to read versionCode'; exit 1; }
+          test -n "$VERSION_NAME" || { echo 'Unable to read versionName'; exit 1; }
+          [[ "$VERSION_CODE" =~ ^[0-9]+$ ]] || { echo 'Invalid versionCode'; exit 1; }
+          [[ "$VERSION_NAME" =~ ^[A-Za-z0-9._-]+$ ]] || { echo 'Invalid versionName'; exit 1; }
+          test "$(tr -d '[:space:]' < VERSION)" = "$VERSION_NAME" || { echo 'VERSION file does not match app/build.gradle'; exit 1; }
+          grep -Fq 'static final String DEFAULT_PANEL_BASE = "https://xvpn666101.xyz";' app/src/main/java/com/xvpn/android/ApiClient.java
+          grep -Fq 'android:name="android.net.VpnService.SUPPORTS_ALWAYS_ON"' app/src/main/AndroidManifest.xml
+          grep -Fq 'android:value="false"' app/src/main/AndroidManifest.xml
+
+          echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
+          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+          echo "Building XVPN $VERSION_NAME (versionCode $VERSION_CODE)"
+
+      - name: Verify bundled sing-box Core
+        shell: bash
+        run: |
+          set -euo pipefail
+          AAR="app/libs/libbox-1.13.19-arm64.aar"
+          test -f "$AAR"
+          printf '%s  %s\n' \
+            '9b73fc5fb5591e9b0f269ae04685daa9ece38e95452454bf642f8140fa769ca8' \
+            "$AAR" | sha256sum --check --strict
+          CORE_SHA="$(unzip -p "$AAR" jni/arm64-v8a/libbox.so | sha256sum | cut -d' ' -f1)"
+          test "$CORE_SHA" = 'a54962a1ecc2f3d6b2311903dc80993d7aa7f5327d5bbb06a61899e420326aaa'
+
+          printf '%s  %s\n' \
+            '9cccc08ff669d707d7662ed78cc0a3b2626c4f16a6d151a9167dadb44d3da7b8' \
+            'app/src/main/assets/rules/geosite-geolocation-cn.srs' | sha256sum --check --strict
+          printf '%s  %s\n' \
+            '0acf5dad38fba9db2dade29ce5e4edc6902220944f30628ae46ed16cb0ec5edd' \
+            'app/src/main/assets/rules/geoip-cn.srs' | sha256sum --check --strict
+
+          BINDINGS_JAR="${RUNNER_TEMP}/libbox-classes.jar"
+          unzip -p "$AAR" classes.jar > "$BINDINGS_JAR"
+          if unzip -Z1 "$BINDINGS_JAR" | grep -Fx 'go/libbox/gojni/R.class' >/dev/null; then
+            echo 'Bundled bindings must not contain go.libbox.gojni.R; AGP generates it from the AAR namespace.'
+            exit 1
+          fi
+
+      - name: Restore permanent release signing key
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.XVPN_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.XVPN_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.XVPN_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.XVPN_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$KEYSTORE_BASE64" || { echo 'Missing secret: XVPN_KEYSTORE_BASE64'; exit 1; }
+          test -n "$KEYSTORE_PASSWORD" || { echo 'Missing secret: XVPN_KEYSTORE_PASSWORD'; exit 1; }
+          test -n "$KEY_ALIAS" || { echo 'Missing secret: XVPN_KEY_ALIAS'; exit 1; }
+          test -n "$KEY_PASSWORD" || { echo 'Missing secret: XVPN_KEY_PASSWORD'; exit 1; }
+
+          KEYSTORE_PATH="${RUNNER_TEMP}/xvpn-release.jks"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
+
+          keytool -list \
+            -keystore "$KEYSTORE_PATH" \
+            -storepass "$KEYSTORE_PASSWORD" \
+            -alias "$KEY_ALIAS" >/dev/null
+
+          echo "XVPN_KEYSTORE_FILE=$KEYSTORE_PATH" >> "$GITHUB_ENV"
+          echo "XVPN_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+          echo "XVPN_KEY_ALIAS=$KEY_ALIAS" >> "$GITHUB_ENV"
+          echo "XVPN_KEY_PASSWORD=$KEY_PASSWORD" >> "$GITHUB_ENV"
+
+      - name: Lint and build signed release APK
+        run: gradle --no-daemon clean :app:testReleaseUnitTest :app:lintRelease :app:assembleRelease
+
+      - name: Verify APK signature and package
+        shell: bash
+        run: |
+          set -euo pipefail
+          APKSIGNER="$(command -v apksigner || true)"
+          AAPT="$(command -v aapt || true)"
+          ZIPALIGN="$(command -v zipalign || true)"
+          if [ -z "$APKSIGNER" ]; then APKSIGNER="${ANDROID_HOME}/build-tools/35.0.0/apksigner"; fi
+          if [ -z "$AAPT" ]; then AAPT="${ANDROID_HOME}/build-tools/35.0.0/aapt"; fi
+          if [ -z "$ZIPALIGN" ]; then ZIPALIGN="${ANDROID_HOME}/build-tools/35.0.0/zipalign"; fi
+
+          APK="app/build/outputs/apk/release/app-release.apk"
+          test -f "$APK"
+          "$ZIPALIGN" -c -P 16 4 "$APK"
+          SIGNATURE_OUTPUT="$("$APKSIGNER" verify --verbose --print-certs "$APK")"
+          printf '%s\n' "$SIGNATURE_OUTPUT"
+          printf '%s\n' "$SIGNATURE_OUTPUT" | grep -F 'Verified using v2 scheme (APK Signature Scheme v2): true'
+
+          BADGING="$("$AAPT" dump badging "$APK")"
+          printf '%s\n' "$BADGING"
+          printf '%s\n' "$BADGING" | grep -F "package: name='com.xvpn.android' versionCode='${VERSION_CODE}' versionName='${VERSION_NAME}'"
+          printf '%s\n' "$BADGING" | grep -F "sdkVersion:'26'"
+          printf '%s\n' "$BADGING" | grep -F "targetSdkVersion:'36'"
+          printf '%s\n' "$BADGING" | grep -F "native-code: 'arm64-v8a'"
+
+          DEX_COUNT="$(unzip -Z1 "$APK" | grep -Ec '^classes([0-9]+)?\.dex$')"
+          test "$DEX_COUNT" -eq 1
+          unzip -p "$APK" assets/rules/geosite-geolocation-cn.srs | sha256sum | grep -Fq '9cccc08ff669d707d7662ed78cc0a3b2626c4f16a6d151a9167dadb44d3da7b8'
+          unzip -p "$APK" assets/rules/geoip-cn.srs | sha256sum | grep -Fq '0acf5dad38fba9db2dade29ce5e4edc6902220944f30628ae46ed16cb0ec5edd'
+          "$AAPT" dump xmltree "$APK" AndroidManifest.xml | grep -F 'android.net.VpnService.SUPPORTS_ALWAYS_ON'
+
+          EXPECTED_CERT="$(tr -d ':[:space:]' < SIGNING_CERT_SHA256.txt | tr 'A-F' 'a-f')"
+          ACTUAL_CERT="$(printf '%s\n' "$SIGNATURE_OUTPUT" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n1 | tr -d ':[:space:]' | tr 'A-F' 'a-f')"
+          test -n "$ACTUAL_CERT"
+          test "$ACTUAL_CERT" = "$EXPECTED_CERT"
+
+      - name: Prepare artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          APK_NAME="XVPN-v${VERSION_NAME}.apk"
+          cp app/build/outputs/apk/release/app-release.apk "dist/${APK_NAME}"
+          cd dist
+          sha256sum "$APK_NAME" > SHA256SUMS.txt
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: XVPN-v${{ env.VERSION_NAME }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
