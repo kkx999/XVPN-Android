@@ -11,7 +11,7 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 
 final class ApiClient {
-    static final String DEFAULT_PANEL_BASE = "https://xvpn666101.xyz";
+    static final String DEFAULT_PANEL_BASE = "https://xvpn.666101.xyz";
     static final String LEGACY_PANEL_BASE = "https://xx.666101.xyz";
 
     private ApiClient() {}

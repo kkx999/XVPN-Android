@@ -20,8 +20,8 @@ android {
         applicationId 'com.xvpn.android'
         minSdk 26
         targetSdk 36
-        versionCode 10017
-        versionName '1.0.0'
+        versionCode 10018
+        versionName '1.0.0-rc'
         manifestPlaceholders = [usesCleartextTraffic: 'false']
         // 1.0.0 remains arm64-only; the bundled libbox AAR is intentionally single-ABI.
         ndk { abiFilters 'arm64-v8a' }

@@ -3,7 +3,7 @@
 ## 源码与构建门槛
 
 - [x] Application ID = `com.xvpn.android`
-- [x] `versionName = 1.0.0`，`versionCode = 10017`
+- [x] `versionName = 1.0.0-rc`，`versionCode = 10018`
 - [x] 仅打包 `arm64-v8a/libbox.so`，libbox 版本固定为 1.13.19
 - [x] libbox AAR 与两份本地 SRS 规则均有固定 SHA-256，GitHub Actions 会在编译前核对
 - [x] 每次首次连接和已连接热切换都会先执行 libbox `checkConfig`
@@ -21,7 +21,7 @@
 - [ ] GitHub Actions `Build XVPN Android` 完整成功
 - [ ] `XVPN-v1.0.0.apk` 证书 SHA-256 与 `SIGNING_CERT_SHA256.txt` 一致
 - [ ] 可从 RC1 覆盖安装，登录、主题、已选节点与分流偏好保留
-- [ ] 旧内置 `https://xx.666101.xyz` 自动迁移到 `https://xvpn666101.xyz`，自定义 Panel 地址不被改写
+- [x] 旧内置 `https://xx.666101.xyz` 自动迁移到 `https://xvpn.666101.xyz`，自定义 Panel 地址不被改写
 - [ ] 浅色 Launcher 图标尺寸和呼吸区正确，无深蓝底
 - [ ] 浅色首页、连接球、Header、卡片与底部弹层无毛刺、色带或过亮蓝边
 - [ ] 深色首页、连接球、Header、卡片与底部弹层不灰蒙，细边、文字与高光对比清楚
