@@ -68,7 +68,7 @@ import java.util.concurrent.Future;
 public final class MainActivity extends android.app.Activity {
     private static final String PREFS = "xvpn_preferences_v1";
     private static final String DEFAULT_BASE_URL = ApiClient.DEFAULT_PANEL_BASE;
-    private static final String DEFAULT_LATENCY_URL = "https://www.gstatic.com/generate_204";
+    private static final String DEFAULT_LATENCY_URL = "http://www.apple.com/library/test/success.html";
     private static final int TAB_HOME = 0;
     private static final int TAB_MINE = 1;
     private static final int REQUEST_VPN_PERMISSION = 509;
@@ -1412,28 +1412,41 @@ private void setRouteMode(RouteMode mode) {
 
     private String latencyTargetLabel() {
         String url=prefs.getString("latency_test_url",DEFAULT_LATENCY_URL);
-        try { return new URL(url).getHost(); } catch(Exception ignored) { return "Google"; }
+        try { return new URL(url).getHost(); } catch(Exception ignored) { return "Apple"; }
     }
 
     private void showLatencyTargetSettings() {
         Dialog dialog=bottomDialog(); LinearLayout sheet=sheet();
         sheet.addView(text("延迟测试网站",21,p.ink,true),matchWrap()); gap(sheet,5);
-        sheet.addView(text("用于网络连通性测试。节点延迟仍以节点入口 TCP 握手为准。",12,p.muted,false),matchWrap()); gap(sheet,14);
+        sheet.addView(text("用于当前隧道的 HTTP/HTTPS 连通性测试；普通节点延迟仍以节点入口 TCP 握手为准。",12,p.muted,false),matchWrap()); gap(sheet,14);
         EditText url=input("https://example.com",false); url.setText(prefs.getString("latency_test_url",DEFAULT_LATENCY_URL)); url.setInputType(InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_VARIATION_URI); sheet.addView(url,matchWrap());
         gap(sheet,10);
-        TextView status=text("默认：Google generate_204",11,p.muted,false); sheet.addView(status,matchWrap()); gap(sheet,14);
+        TextView status=text("默认：Apple success.html",11,p.muted,false); sheet.addView(status,matchWrap()); gap(sheet,14);
         LinearLayout actions=row(); Button test=secondaryButton("测试网站"); Button save=primaryButton("保存"); actions.addView(test,new LinearLayout.LayoutParams(0,dp(52),1f)); gapH(actions,10); actions.addView(save,new LinearLayout.LayoutParams(0,dp(52),1f)); sheet.addView(actions,matchWrap()); gap(sheet,8);
         TextView reset=text("恢复默认网站",12,p.accent,true); reset.setGravity(Gravity.CENTER); reset.setPadding(dp(8),dp(10),dp(8),dp(8)); sheet.addView(reset,matchWrap());
 
         test.setOnClickListener(v->{
-            String candidate=normalizeLatencyUrl(url.getText().toString()); if(candidate==null){toast("请输入有效的 HTTPS 网站");return;}
+            String candidate=normalizeLatencyUrl(url.getText().toString()); if(candidate==null){toast("请输入有效网址，例如 https://cp.cloudflare.com/generate_204");return;}
             test.setEnabled(false); test.setText("测试中…"); status.setText("正在请求…"); status.setTextColor(p.muted);
             io.execute(()->{
                 try{long ms=measureHttpLatency(candidate);runOnUiThread(()->{test.setEnabled(true);test.setText("重新测试");status.setText("响应 "+ms+" ms");status.setTextColor(latencyColor(ms));});}
                 catch(Exception e){runOnUiThread(()->{test.setEnabled(true);test.setText("重新测试");status.setText("连接失败");status.setTextColor(p.danger);});}
             });
         });
-        save.setOnClickListener(v->{String candidate=normalizeLatencyUrl(url.getText().toString());if(candidate==null){toast("请输入有效的 HTTPS 网站");return;}prefs.edit().putString("latency_test_url",candidate).apply();dialog.dismiss();showShell(TAB_MINE);});
+        save.setOnClickListener(v->{
+            String candidate=normalizeLatencyUrl(url.getText().toString());
+            if(candidate==null){toast("请输入有效网址，例如 https://cp.cloudflare.com/generate_204");return;}
+            // This is a user preference, so commit synchronously and verify the
+            // stored value before closing the sheet. It avoids a silent close
+            // that can look like a failed save on some Android devices.
+            boolean stored=prefs.edit().putString("latency_test_url",candidate).commit();
+            if(!stored||!candidate.equals(prefs.getString("latency_test_url",null))){
+                status.setText("保存失败，请重试");status.setTextColor(p.danger);return;
+            }
+            status.setText("已保存 · "+latencyHostLabel(candidate));status.setTextColor(p.success);
+            toast("测试网址已保存");
+            dialog.dismiss();showShell(TAB_MINE);
+        });
         reset.setOnClickListener(v->{url.setText(DEFAULT_LATENCY_URL);url.setSelection(url.length());});
         showBottomDialog(dialog,sheet);
     }
@@ -1471,10 +1484,15 @@ private void setRouteMode(RouteMode mode) {
         if(!value.contains("://")) value="https://"+value;
         try{
             URL u=new URL(value); String protocol=u.getProtocol();
-            if(!"https".equalsIgnoreCase(protocol) && (!BuildConfig.DEBUG || !"http".equalsIgnoreCase(protocol))) return null;
-            if(u.getHost()==null||u.getHost().isEmpty()) return null;
-            return value;
+            if(!"https".equalsIgnoreCase(protocol)&&!"http".equalsIgnoreCase(protocol)) return null;
+            if(u.getHost()==null||u.getHost().isEmpty()||u.getUserInfo()!=null) return null;
+            int port=u.getPort(); if(port==0||port>65535) return null;
+            return u.toExternalForm();
         }catch(Exception e){return null;}
+    }
+
+    private String latencyHostLabel(String target) {
+        try { return new URL(target).getHost(); } catch(Exception ignored) { return "自定义网址"; }
     }
 
     private long measureHttpLatency(String target) throws Exception {
