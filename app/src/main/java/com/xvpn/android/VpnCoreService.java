@@ -276,7 +276,9 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
                 return;
             }
 
-            TunnelHealth health = waitForTunnelHealth();
+            // First connect stays truthful, but should not wait through a
+            // duplicate full verification cycle before the UI can continue.
+            TunnelHealth health = waitForInitialTunnelHealth();
             if (!health.healthy) {
                 throw new IllegalStateException("隧道已建立，但联网检测失败：" + health.error);
             }
@@ -448,12 +450,20 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
      * protected, so Android sends them into XVPN's TUN and they exercise DNS,
      * routing, the selected protocol and the remote egress together.
      */
+    private TunnelHealth waitForInitialTunnelHealth() {
+        return waitForTunnelHealth(1);
+    }
+
     private TunnelHealth waitForTunnelHealth() {
+        return waitForTunnelHealth(2);
+    }
+
+    private TunnelHealth waitForTunnelHealth(int attempts) {
         TunnelHealth last = TunnelHealth.failure("网络暂无响应");
-        for (int attempt = 0; attempt < 2 && !stopRequested.get(); attempt++) {
+        for (int attempt = 0; attempt < attempts && !stopRequested.get(); attempt++) {
             last = probeTunnelOnce();
             if (last.healthy) return last;
-            if (attempt == 0) {
+            if (attempt + 1 < attempts) {
                 try { Thread.sleep(450L); }
                 catch (InterruptedException interrupted) {
                     Thread.currentThread().interrupt();

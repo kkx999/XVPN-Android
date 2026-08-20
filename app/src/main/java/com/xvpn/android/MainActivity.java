@@ -117,6 +117,13 @@ public final class MainActivity extends android.app.Activity {
                 return;
             }
             if(CoreState.ACTION_SWITCH_FAILED.equals(intent.getAction())){
+                if(nodeScanRunning){
+                    // Connected-state optimization deliberately tries candidate
+                    // tunnels. A failed candidate is already rolled back by the
+                    // service and should not interrupt the scan with a toast.
+                    refreshCoreBoundViews();
+                    return;
+                }
                 String message=intent.getStringExtra("message");
                 int restoredNodeId=intent.getIntExtra("node_id",0);
                 NodeCatalog.Node restoredNode=catalog.find(restoredNodeId);
@@ -1554,75 +1561,192 @@ private void setRouteMode(RouteMode mode) {
     }
 
     private void runBestNodeScanInPicker(Dialog dialog, TextView action, TextView status, SparseArray<TextView> latencyBadges, SparseArray<SelectionDotView> tails, SparseArray<View> items, boolean[] pickerChanged) {
-        if(nodeScanRunning){status.setVisibility(View.VISIBLE);status.setText("后台节点测速正在进行，请稍候…");return;}
+        if(nodeScanRunning){status.setVisibility(View.VISIBLE);status.setText("节点优选正在进行，请稍候…");return;}
         List<NodeCatalog.Node> nodes=new ArrayList<>(); for(NodeCatalog.Country c:catalog.countries)nodes.addAll(c.nodes);
         if(nodes.isEmpty()){status.setVisibility(View.VISIBLE);status.setText("当前没有可测速节点");return;}
-        nodeScanRunning=true; beginScanAction(action); status.setVisibility(View.VISIBLE); status.setTextColor(p.muted); status.setText("正在准备节点测速…");
+        nodeScanRunning=true; beginScanAction(action); status.setVisibility(View.VISIBLE); status.setTextColor(p.muted);
         String scanToken=token;
+        if(CoreState.read(this).state==CoreState.RUNNING){
+            status.setText("将逐个真实切换验证节点，请勿退出…");
+            runConnectedBestNodeScanInPicker(dialog,action,status,latencyBadges,tails,items,pickerChanged,nodes,scanToken);
+            return;
+        }
+
+        status.setText("正在测试节点入口…");
         io.execute(()->{
-            List<NodeCatalog.Node> probeTargets=new ArrayList<>(nodes);
-            List<NodeProbeResult> results=new ArrayList<>();
-            CoreState.Snapshot connectedState=CoreState.read(this);
-            if(connectedState.state==CoreState.RUNNING){
-                NodeCatalog.Node connected=catalog.find(connectedState.nodeId);
-                VpnCoreService.TunnelHealth health=VpnCoreService.checkTunnelHealthNow();
-                if(connected!=null&&health.healthy){
-                    results.add(NodeProbeResult.success(connected,health.latencyMs));
-                    probeTargets.removeIf(candidate->candidate.id==connected.id);
-                    runOnUiThread(()->{
-                        if(!dialog.isShowing())return;
-                        TextView badge=latencyBadges.get(connected.id);
-                        if(badge!=null){
-                            badge.setText(health.latencyMs+" ms");
-                            badge.setTextColor(latencyColor(health.latencyMs));
-                            popResult(badge);
-                        }
-                        status.setText("已完成 1 / "+nodes.size()+" · "+connected.name+"（当前隧道正常）");
-                    });
-                }
-            }
-            results.addAll(probeNodes(probeTargets,2200,(result,completed,total)->runOnUiThread(()->{
-                if(!dialog.isShowing())return;
-                status.setText("已完成 "+(completed+1)+" / "+nodes.size()+" · "+result.node.name);
-                TextView badge=latencyBadges.get(result.node.id);
-                if(badge!=null){
-                    badge.setText(result.error==null?result.latencyMs+" ms":probeFailureLabel(result.error));
-                    badge.setTextColor(result.error==null?latencyColor(result.latencyMs):result.error instanceof UdpProbeUnavailableException?p.warningText:p.danger);
-                    popResult(badge);
-                }
-            })));
-            NodeCatalog.Node bestNode=null;long bestMs=Long.MAX_VALUE;int udpSkipped=0;
-            for(NodeProbeResult result:results){
-                if(result.error==null){prefs.edit().putLong("node_latency_"+result.node.id,result.latencyMs).apply();if(result.latencyMs<bestMs){bestMs=result.latencyMs;bestNode=result.node;}}
-                else if(result.error instanceof UdpProbeUnavailableException)udpSkipped++;
-            }
-            final NodeCatalog.Node winner=bestNode; final long winnerMs=bestMs; final int skippedUdp=udpSkipped;
+            List<NodeProbeResult> results=probeNodes(nodes,2200,(result,completed,total)->
+                    showPickerProbeResult(dialog,status,latencyBadges,result,completed,total,"入口测试"));
+            NodeCatalog.Node bestNode=bestNode(results);
+            long bestMs=bestLatency(results);
             runOnUiThread(()->{
                 nodeScanRunning=false;
-                finishScanAction(action,winner!=null);
-                if(!scanToken.equals(token)||token.isEmpty()) return;
-                if(!dialog.isShowing()) return;
-                if(winner==null){status.setText(skippedUdp>0?"UDP 节点需连接后实测，未参与入口优选":"测速完成 · 暂无可用节点");status.setTextColor(skippedUdp>0?p.warningText:p.danger);return;}
-                if(!reconfigureConnectedNode(winner)){status.setText("节点可用，但切换配置失败");status.setTextColor(p.danger);return;}
-                selectedNode=catalog.find(winner.id);
-                if(selectedNode!=null)prefs.edit().putInt("selected_node_id",selectedNode.id).putBoolean("manual_node_selected",true).putBoolean("initial_best_node_scan_v1",true).apply();
-                pickerChanged[0]=true;
-                for(int i=0;i<tails.size();i++){
-                    int id=tails.keyAt(i); boolean chosen=selectedNode!=null&&selectedNode.id==id;
-                    SelectionDotView tail=tails.valueAt(i); tail.setActive(chosen);
-                    View item=items.get(id); if(item!=null)item.setBackground(roundRect(chosen?p.accentSoft:p.surfaceAlt,16,chosen?p.accent:0,chosen?1:0));
-                }
-                status.setText("已选择 "+winner.name+" · "+winnerMs+" ms"+(skippedUdp>0?" · UDP 节点需连接实测":"")); status.setTextColor(p.success);
-                View winnerItem=items.get(winner.id); if(winnerItem!=null)highlightWinner(winnerItem);
+                finishScanAction(action,bestNode!=null);
+                if(!scanToken.equals(token)||token.isEmpty()||!dialog.isShowing())return;
+                if(bestNode==null){status.setText("测速完成 · 暂无可用节点");status.setTextColor(p.danger);return;}
+                if(!reconfigureConnectedNode(bestNode)){status.setText("节点可用，但切换配置失败");status.setTextColor(p.danger);return;}
+                selectPickerWinner(dialog,status,tails,items,pickerChanged,bestNode,bestMs,"已选择 ");
             });
         });
     }
 
+    /**
+     * A candidate cannot be truthfully measured through the currently active
+     * tunnel.  While connected we therefore switch each candidate, wait for the
+     * service's own end-to-end health check, then measure that live tunnel.
+     * Failed candidates are rolled back by VpnCoreService before the next one.
+     */
+    private void runConnectedBestNodeScanInPicker(Dialog dialog, TextView action, TextView status,
+                                                   SparseArray<TextView> latencyBadges,
+                                                   SparseArray<SelectionDotView> tails,
+                                                   SparseArray<View> items, boolean[] pickerChanged,
+                                                   List<NodeCatalog.Node> nodes, String scanToken) {
+        io.execute(()->{
+            List<NodeProbeResult> results=new ArrayList<>();
+            CoreState.Snapshot initialState=CoreState.read(this);
+            NodeCatalog.Node current=catalog.find(initialState.nodeId);
+            int completed=0;
+
+            if(current!=null){
+                VpnCoreService.TunnelHealth health=VpnCoreService.checkTunnelHealthNow();
+                NodeProbeResult currentResult=health.healthy
+                        ?NodeProbeResult.success(current,health.latencyMs)
+                        :NodeProbeResult.failure(current,new NodeProbeException("隧道异常",null));
+                results.add(currentResult);
+                completed++;
+                showPickerProbeResult(dialog,status,latencyBadges,currentResult,completed,nodes.size(),"当前隧道");
+            }
+
+            for(NodeCatalog.Node candidate:nodes){
+                if(current!=null&&candidate.id==current.id)continue;
+                final int nextCompleted=completed+1;
+                runOnUiThread(()->{
+                    if(dialog.isShowing())status.setText("正在真实验证 "+nextCompleted+" / "+nodes.size()+" · "+candidate.name);
+                });
+                NodeProbeResult result=measureConnectedCandidate(candidate);
+                results.add(result);
+                completed++;
+                showPickerProbeResult(dialog,status,latencyBadges,result,completed,nodes.size(),"真实验证");
+            }
+
+            NodeCatalog.Node winner=bestNode(results);
+            long winnerMs=bestLatency(results);
+            boolean winnerActive=winner!=null&&CoreState.read(this).state==CoreState.RUNNING
+                    &&CoreState.read(this).nodeId==winner.id;
+            if(winner!=null&&!winnerActive){
+                final NodeCatalog.Node candidateWinner=winner;
+                runOnUiThread(()->{
+                    if(dialog.isShowing())status.setText("正在保留最快节点 · "+candidateWinner.name);
+                });
+                NodeProbeResult restored=measureConnectedCandidate(candidateWinner);
+                if(restored.error!=null){
+                    winner=null;
+                    winnerMs=0L;
+                }
+            }
+
+            final NodeCatalog.Node finalWinner=winner;
+            final long finalWinnerMs=winnerMs;
+            runOnUiThread(()->{
+                nodeScanRunning=false;
+                finishScanAction(action,finalWinner!=null);
+                if(!scanToken.equals(token)||token.isEmpty()||!dialog.isShowing())return;
+                if(finalWinner==null){
+                    status.setText("真实验证完成 · 未切换节点，已保留可用连接");
+                    status.setTextColor(p.warningText);
+                    return;
+                }
+                selectPickerWinner(dialog,status,tails,items,pickerChanged,finalWinner,finalWinnerMs,"真实优选完成 · ");
+            });
+        });
+    }
+
+    private NodeProbeResult measureConnectedCandidate(NodeCatalog.Node candidate) {
+        try{
+            String config=SingBoxConfigBuilder.build(this,candidate,routeMode).toString();
+            VpnCoreService.reconfigure(this,config,candidate.id,candidate.name,routeMode.label);
+            if(!awaitRunningNode(candidate.id,9000L))throw new NodeProbeException("切换失败",null);
+            VpnCoreService.TunnelHealth health=VpnCoreService.checkTunnelHealthNow();
+            // The service has already passed an end-to-end health check before
+            // publishing RUNNING.  A second transient probe failure must not
+            // incorrectly reject a live candidate.
+            return NodeProbeResult.success(candidate,health.healthy?health.latencyMs:1800L);
+        }catch(Exception error){
+            return NodeProbeResult.failure(candidate,error instanceof NodeProbeException
+                    ?error:new NodeProbeException("切换失败",error));
+        }
+    }
+
+    private boolean awaitRunningNode(int nodeId,long timeoutMs) {
+        long deadline=SystemClock.elapsedRealtime()+timeoutMs;
+        boolean observedSwitching=false;
+        while(SystemClock.elapsedRealtime()<deadline){
+            CoreState.Snapshot state=CoreState.read(this);
+            if(state.state==CoreState.SWITCHING)observedSwitching=true;
+            if(state.state==CoreState.RUNNING&&state.nodeId==nodeId)return true;
+            if(observedSwitching&&state.state==CoreState.RUNNING&&state.nodeId!=nodeId)return false;
+            if(state.state==CoreState.ERROR||state.state==CoreState.STOPPED)return false;
+            try{Thread.sleep(100L);}catch(InterruptedException interrupted){Thread.currentThread().interrupt();return false;}
+        }
+        return false;
+    }
+
+    private void showPickerProbeResult(Dialog dialog,TextView status,SparseArray<TextView> latencyBadges,
+                                       NodeProbeResult result,int completed,int total,String phase) {
+        runOnUiThread(()->{
+            if(!dialog.isShowing())return;
+            status.setText(phase+" "+completed+" / "+total+" · "+result.node.name);
+            TextView badge=latencyBadges.get(result.node.id);
+            if(badge==null)return;
+            badge.setText(result.error==null?result.latencyMs+" ms":probeFailureLabel(result.error));
+            badge.setTextColor(result.error==null?latencyColor(result.latencyMs):p.danger);
+            popResult(badge);
+        });
+    }
+
+    private NodeCatalog.Node bestNode(List<NodeProbeResult> results) {
+        NodeCatalog.Node best=null;
+        long bestMs=Long.MAX_VALUE;
+        for(NodeProbeResult result:results){
+            if(result.error==null&&result.latencyMs<bestMs){best=result.node;bestMs=result.latencyMs;}
+        }
+        return best;
+    }
+
+    private long bestLatency(List<NodeProbeResult> results) {
+        long bestMs=Long.MAX_VALUE;
+        for(NodeProbeResult result:results)if(result.error==null&&result.latencyMs<bestMs)bestMs=result.latencyMs;
+        return bestMs==Long.MAX_VALUE?0L:bestMs;
+    }
+
+    private void selectPickerWinner(Dialog dialog,TextView status,SparseArray<SelectionDotView> tails,
+                                    SparseArray<View> items,boolean[] pickerChanged,NodeCatalog.Node winner,
+                                    long winnerMs,String prefix) {
+        selectedNode=catalog.find(winner.id);
+        if(selectedNode==null)return;
+        prefs.edit().putInt("selected_node_id",selectedNode.id).putBoolean("manual_node_selected",true)
+                .putBoolean("initial_best_node_scan_v1",true).putLong("node_latency_"+selectedNode.id,winnerMs).apply();
+        pickerChanged[0]=true;
+        for(int i=0;i<tails.size();i++){
+            int id=tails.keyAt(i); boolean chosen=selectedNode.id==id;
+            tails.valueAt(i).setActive(chosen);
+            View item=items.get(id);
+            if(item!=null)item.setBackground(roundRect(chosen?p.accentSoft:p.surfaceAlt,16,chosen?p.accent:0,chosen?1:0));
+        }
+        status.setText(prefix+winner.name+" · "+winnerMs+" ms");
+        status.setTextColor(p.success);
+        View winnerItem=items.get(winner.id);if(winnerItem!=null)highlightWinner(winnerItem);
+    }
+
     private static final class UdpProbeUnavailableException extends Exception {}
-    private static final class NodeProbeException extends Exception {final String label;NodeProbeException(String label,Throwable cause){super(label,cause);this.label=label;}}
+    private static final class NodeProbeException extends Exception {
+        final String label;
+        NodeProbeException(String label,Throwable cause){super(label,cause);this.label=label;}
+    }
     private interface ProbeProgress {void onResult(NodeProbeResult result,int completed,int total);}
     private static final class NodeProbeResult {
-        final NodeCatalog.Node node;final long latencyMs;final Exception error;
+        final NodeCatalog.Node node;
+        final long latencyMs;
+        final Exception error;
         private NodeProbeResult(NodeCatalog.Node node,long latencyMs,Exception error){this.node=node;this.latencyMs=latencyMs;this.error=error;}
         static NodeProbeResult success(NodeCatalog.Node node,long latencyMs){return new NodeProbeResult(node,latencyMs,null);}
         static NodeProbeResult failure(NodeCatalog.Node node,Exception error){return new NodeProbeResult(node,0L,error);}
