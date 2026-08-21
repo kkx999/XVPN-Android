@@ -1,9 +1,9 @@
-# XVPN Android v1.1.0 测试清单
+# XVPN Android v1.1.1-rc1 测试清单
 
 ## 源码与构建门槛
 
 - [x] Application ID = `com.xvpn.android`
-- [x] `versionName = 1.1.0`，`versionCode = 10100`
+- [x] `versionName = 1.1.1-rc1`，`versionCode = 10101`
 - [x] 仅打包 `arm64-v8a/libbox.so`，libbox 版本固定为 1.13.19
 - [x] libbox AAR 与两份本地 SRS 规则均有固定 SHA-256，GitHub Actions 会在编译前核对
 - [x] 每次首次连接和已连接热切换都会先执行 libbox `checkConfig`
@@ -19,7 +19,7 @@
 ## 安装、浅色与深色
 
 - [ ] GitHub Actions `Build XVPN Android` 完整成功
-- [ ] `XVPN-v1.1.0.apk` 证书 SHA-256 与 `SIGNING_CERT_SHA256.txt` 一致
+- [ ] `XVPN-v1.1.1-rc1.apk` 证书 SHA-256 与 `SIGNING_CERT_SHA256.txt` 一致
 - [ ] “联网检测网站”可保存裸域名、HTTP 或 HTTPS 地址；保存后首次连接、模式/节点切换与连接诊断均请求该地址，重启 App 后仍保留
 - [ ] 可从 RC1 覆盖安装，登录、主题、已选节点与分流偏好保留
 - [x] RC2 以 `https://xvpn.666101.xyz` 建立新的内置地址基线；后续内置地址迁移不会改写自定义 Panel 地址
@@ -65,7 +65,7 @@
 - [ ] 全局代理：普通域名解析经代理 TCP DNS；节点域名仍可通过独立直连引导解析建立连接
 - [ ] 台湾家宽节点连续连接 5 次均能解析 Google 等境外域名，不出现 `DNS_PROBE_FINISHED_NO_INTERNET` 或“隧道已建立但 DNS 解析失败”
 - [ ] 境外随机测试域名不出现运营商 DNS；国内直连域名与节点域名使用本地引导 DNS 属于预期行为
-- [ ] IPv6 可用网络上只返回/使用代理支持的 IPv4，不暴露本地运营商 IPv6，也不因 AAAA 长时间卡死
+- [ ] IPv6 可用网络上 TUN 接管 IPv6 默认路由；DNS 优先返回代理可承载的 IPv4，不暴露本地运营商 IPv6，也不因 AAAA 长时间卡死
 - [ ] Android 私人 DNS 开 / 关两种状态均可上网；智能分流策略符合预期
 - [ ] 网页 QUIC（UDP/443）被快速拒绝并正常回落 TCP/TLS；其他 UDP、视频、语音与即时通信可用
 
@@ -91,12 +91,15 @@
 - [ ] 无网、DNS 不可达、错误证书、错误 REALITY 公钥均显示可理解的失败信息
 - [ ] 通知权限关闭时 VPN 仍可启动，“我的 → 连接状态通知”可打开系统设置
 - [ ] Panel 更新接口超时/5xx 时回退 GitHub；Panel 明确 `enabled=false` 时不绕过策略
-- [ ] Android 系统 Always-on 控件不可用，普通前台连接与后台保持正常
+- [ ] Android 系统 Always-on 与“屏蔽未使用 VPN 的连接”控件可用；重启、杀进程和 Wi-Fi / 蜂窝切换后可从加密的最后可用配置恢复
+- [ ] 注销、撤销 VPN 授权、账户停用或节点失效后清除恢复配置，Always-on 不会使用过期凭据反复启动
+- [ ] Panel 最低版本设置为 1.1.1-rc1 后，旧版登录 / bootstrap / 节点 / 流量接口返回 HTTP 426，并进入不可绕过的强制更新界面
+- [ ] App 内更新显示下载进度，校验文件大小、SHA-256、包名、版本与固定签名；错误文件不得调起安装器
 
 ## 正式版发布门槛
 
 - [ ] 上述真机项目全部通过，至少连续运行 24 小时无崩溃或 VPN 回环
 - [ ] 保存 GitHub Actions 日志、APK SHA-256、签名证书摘要与测试记录
-- [ ] 仅在完成验收后创建 GitHub `v1.0.0` Release，并继续使用相同固定签名
+- [ ] 仅在完成验收并递增正式版本后创建 Release，并继续使用相同固定签名
 
 失败记录至少包含：手机型号、Android 版本、浅色/深色、网络类型、节点协议、分流模式、操作时间、界面提示、通知状态与脱敏后的 `adb logcat -s XVPN-Core`。不得提交节点 URI、UUID、密码、Token、私钥或完整服务器配置。

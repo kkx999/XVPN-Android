@@ -10,6 +10,7 @@ final class CoreState {
     static final String ACTION_AUTH_INVALID = "com.xvpn.android.action.CORE_AUTH_INVALID";
     static final String ACTION_NODE_INVALID = "com.xvpn.android.action.CORE_NODE_INVALID";
     static final String ACTION_SWITCH_FAILED = "com.xvpn.android.action.CORE_SWITCH_FAILED";
+    static final String ACTION_VERSION_BLOCKED = "com.xvpn.android.action.CORE_VERSION_BLOCKED";
 
     static final int STOPPED = 0;
     static final int STARTING = 1;
@@ -74,6 +75,10 @@ final class CoreState {
 
     static void notifyNodeInvalid(Context context) {
         context.sendBroadcast(new Intent(ACTION_NODE_INVALID).setPackage(context.getPackageName()));
+    }
+
+    static void notifyVersionBlocked(Context context) {
+        context.sendBroadcast(new Intent(ACTION_VERSION_BLOCKED).setPackage(context.getPackageName()));
     }
 
     static void notifySwitchFailed(Context context, String message, int restoredNodeId, String restoredRouteLabel) {

@@ -19,7 +19,7 @@ import java.util.Set;
 /** Builds the validated sing-box 1.13 profile consumed by {@link VpnCoreService}. */
 final class SingBoxConfigBuilder {
     static final int TUN_MTU = 1400;
-    static final String NETWORK_PROFILE = "IPv4 · MTU 1400 · 分流 DNS";
+    static final String NETWORK_PROFILE = "双栈防泄漏 · MTU 1400 · 分流 DNS";
     private static final String APP_PREFS = "xvpn_preferences_v1";
     private static final String DEFAULT_LATENCY_URL = "http://www.apple.com/library/test/success.html";
     private static final Set<String> SUPPORTED_TYPES = new HashSet<>(Arrays.asList(
@@ -52,10 +52,12 @@ final class SingBoxConfigBuilder {
         JSONObject tun = new JSONObject()
                 .put("type", "tun")
                 .put("tag", "tun-in")
-                // IPv4-only is intentional for 1.0.0. It avoids broken AAAA paths and
-                // prevents a local carrier IPv6 route from escaping the VPN on devices
-                // whose node does not provide a working IPv6 egress.
-                .put("address", new JSONArray().put("172.19.0.1/30"))
+                // Capture both address families so a carrier IPv6 route can never
+                // bypass smart routing. DNS remains ipv4_only for node compatibility;
+                // literal IPv6 is still contained by this TUN and cannot leak directly.
+                .put("address", new JSONArray()
+                        .put("172.19.0.1/30")
+                        .put("fdfe:dcba:9876::1/126"))
                 .put("mtu", TUN_MTU)
                 .put("auto_route", true)
                 .put("strict_route", true)

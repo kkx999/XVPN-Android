@@ -70,7 +70,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Real sing-box 1.13.19 data plane for XVPN Android 1.0.0.
+ * Real sing-box 1.13.19 data plane for XVPN Android 1.1.1-rc1.
  *
  * Connection state is published only after libbox has accepted the config and
  * established Android's TUN file descriptor.  No optimistic/fake connected
@@ -100,6 +100,7 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
     private final ExecutorService reportIo = Executors.newSingleThreadExecutor();
     private final AtomicBoolean stopRequested = new AtomicBoolean(false);
     private final AtomicBoolean switchInProgress = new AtomicBoolean(false);
+    private final AtomicBoolean versionBlockNotified = new AtomicBoolean(false);
     private CommandServer commandServer;
     private ParcelFileDescriptor tunDescriptor;
     private ConnectivityManager connectivity;
@@ -111,6 +112,7 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
     private volatile String routeLabel = "智能分流";
     private volatile String sessionId = "";
     private volatile String activeConfig = "";
+    private volatile String activeHealthTarget = "";
     private volatile TunnelHealth lastTunnelHealth = TunnelHealth.failure("尚未完成联网检测");
 
     private ScheduledExecutorService metricsExecutor;
@@ -135,8 +137,8 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
             return InetAddress.getAllByName(host);
         }
         Network physical = service.physicalNetwork();
-        if (physical == null) throw new IOException("未找到可用的物理网络");
-        InetAddress[] answers = physical.getAllByName(host);
+        InetAddress[] answers = physical == null
+                ? InetAddress.getAllByName(host) : physical.getAllByName(host);
         for (InetAddress answer : answers) if (answer instanceof java.net.Inet4Address) return answers;
         throw new UnknownHostException("物理网络未返回 IPv4 地址");
     }
@@ -146,13 +148,20 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
         VpnCoreService service = activeInstance;
         if (service == null || !CoreState.read(service).isActive()) return new Socket();
         Network physical = service.physicalNetwork();
-        if (physical == null) throw new IOException("未找到可用的物理网络");
-        Socket socket = physical.getSocketFactory().createSocket();
+        Socket socket;
+        try {
+            socket = physical == null ? new Socket() : physical.getSocketFactory().createSocket();
+        } catch (Exception networkFactoryFailure) {
+            socket = new Socket();
+        }
         // The Network socket factory has already pinned this socket to the
         // physical transport. protect() is an additional loop guard; a few
         // vendor ROMs return false for an already-bound socket, so do not turn
         // that harmless quirk into another false "不可达" result.
-        if (!service.protect(socket)) Log.w(TAG, "Physical probe socket was already network-bound");
+        if (!service.protect(socket) && physical == null) {
+            try { socket.close(); } catch (Exception ignored) {}
+            throw new IOException("无法让测速连接绕过当前 VPN");
+        }
         return socket;
     }
 
@@ -233,6 +242,12 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
         context.startService(intent);
     }
 
+    /** Logout/server changes must prevent an Always-on restart with stale credentials. */
+    static void stopAndForget(Context context) {
+        SecureVpnProfileStore.clear(context);
+        stop(context);
+    }
+
     @Override public void onCreate() {
         super.onCreate();
         live = true;
@@ -262,16 +277,35 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
                     + (nextRouteLabel.isEmpty() ? routeLabel : nextRouteLabel) + " · "
                     + (nextNodeName.isEmpty() ? "当前节点" : nextNodeName), false);
             coreExecutor.execute(() -> reconfigureCore(config, nextNodeId, nextNodeName, nextRouteLabel, healthTarget));
-            return Service.START_NOT_STICKY;
+            return Service.START_STICKY;
         }
-        if (!ACTION_START.equals(action) || intent == null) return Service.START_NOT_STICKY;
-        if (commandServer != null || CoreState.read(this).isActive()) return Service.START_NOT_STICKY;
+        if (commandServer != null || CoreState.read(this).isActive()) return Service.START_STICKY;
 
-        String config = intent.getStringExtra(EXTRA_CONFIG);
-        String healthTarget = normalizeHealthTarget(intent.getStringExtra(EXTRA_HEALTH_TARGET));
-        nodeId = intent.getIntExtra(EXTRA_NODE_ID, 0);
-        nodeName = value(intent.getStringExtra(EXTRA_NODE_NAME));
-        routeLabel = value(intent.getStringExtra(EXTRA_ROUTE_LABEL));
+        final boolean explicitStart = ACTION_START.equals(action) && intent != null;
+        String config;
+        String healthTarget;
+        if (explicitStart) {
+            config = intent.getStringExtra(EXTRA_CONFIG);
+            healthTarget = normalizeHealthTarget(intent.getStringExtra(EXTRA_HEALTH_TARGET));
+            nodeId = intent.getIntExtra(EXTRA_NODE_ID, 0);
+            nodeName = value(intent.getStringExtra(EXTRA_NODE_NAME));
+            routeLabel = value(intent.getStringExtra(EXTRA_ROUTE_LABEL));
+            // Only a profile that has passed a real tunnel health check is eligible
+            // for future system restarts.
+            SecureVpnProfileStore.clear(this);
+        } else {
+            SecureVpnProfileStore.Profile profile = SecureVpnProfileStore.load(this);
+            if (profile == null) {
+                CoreState.publishLifecycle(this, CoreState.STOPPED, 0, "", "");
+                stopSelf(startId);
+                return Service.START_NOT_STICKY;
+            }
+            config = profile.config;
+            healthTarget = normalizeHealthTarget(profile.healthTarget);
+            nodeId = profile.nodeId;
+            nodeName = value(profile.nodeName);
+            routeLabel = value(profile.routeLabel);
+        }
         if (routeLabel.isEmpty()) routeLabel = "智能分流";
         if (config == null || config.trim().isEmpty() || nodeId <= 0) {
             failStart("节点配置为空，请刷新节点后重试");
@@ -284,7 +318,7 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
         startForeground(NOTIFICATION_ID, serviceNotification(
                 "XVPN 正在连接", displayNodeName() + " · " + routeLabel, true, false));
         coreExecutor.execute(() -> startCore(config, healthTarget));
-        return Service.START_NOT_STICKY;
+        return Service.START_STICKY;
     }
 
     @Override public IBinder onBind(Intent intent) {
@@ -293,6 +327,7 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
     }
 
     @Override public void onRevoke() {
+        SecureVpnProfileStore.clear(this);
         requestStop();
     }
 
@@ -341,6 +376,8 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
 
             lastTunnelHealth = health;
             activeConfig = config;
+            activeHealthTarget = healthTarget;
+            persistActiveProfile();
             CoreState.publishLifecycle(this, CoreState.RUNNING, nodeId, nodeName, "");
             updateForegroundNotification("XVPN 已连接", connectedNotificationText(0L, 0L), true);
             startMetricsAndReporting();
@@ -357,6 +394,7 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
         final String previousNodeName = nodeName;
         final String previousRouteLabel = routeLabel;
         final String previousConfig = activeConfig;
+        final String previousHealthTarget = activeHealthTarget;
         boolean schedulersStopped = false;
         boolean reloadAttempted = false;
         try {
@@ -398,6 +436,8 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
 
             lastTunnelHealth = health;
             activeConfig = config;
+            activeHealthTarget = healthTarget;
+            persistActiveProfile();
             CoreState.publishLifecycle(this, CoreState.RUNNING, nodeId, nodeName, "");
             updateForegroundNotification("XVPN 已连接", connectedNotificationText(0L, 0L), true);
             startMetricsAndReporting();
@@ -422,6 +462,8 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
                     nodeName = previousNodeName;
                     routeLabel = previousRouteLabel;
                     activeConfig = previousConfig;
+                    activeHealthTarget = previousHealthTarget;
+                    persistActiveProfile();
                     if (schedulersStopped) {
                         sessionId = UUID.randomUUID().toString();
                         startMetricsAndReporting();
@@ -463,6 +505,15 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
             Libbox.setup(options);
             libboxReady = true;
             Log.i(TAG, "libbox ready: " + Libbox.version());
+        }
+    }
+
+    private void persistActiveProfile() {
+        try {
+            SecureVpnProfileStore.save(this, activeConfig, nodeId, nodeName, routeLabel, activeHealthTarget);
+        } catch (Exception error) {
+            Log.e(TAG, "Unable to persist encrypted Always-on profile", error);
+            SecureVpnProfileStore.clear(this);
         }
     }
 
@@ -616,14 +667,14 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
             builder.addDnsServer(options.getDNSServerAddress().getValue());
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 int v4 = addRoutes(builder, options.getInet4RouteAddress(), false);
-                if (v4 == 0 && options.getInet4Address().hasNext()) builder.addRoute("0.0.0.0", 0);
+                if (v4 == 0) builder.addRoute("0.0.0.0", 0);
                 int v6 = addRoutes(builder, options.getInet6RouteAddress(), false);
-                if (v6 == 0 && options.getInet6Address().hasNext()) builder.addRoute("::", 0);
+                if (v6 == 0) builder.addRoute("::", 0);
                 addRoutes(builder, options.getInet4RouteExcludeAddress(), true);
                 addRoutes(builder, options.getInet6RouteExcludeAddress(), true);
             } else {
-                addLegacyRoutes(builder, options.getInet4RouteRange());
-                addLegacyRoutes(builder, options.getInet6RouteRange());
+                if (addLegacyRoutes(builder, options.getInet4RouteRange()) == 0) builder.addRoute("0.0.0.0", 0);
+                if (addLegacyRoutes(builder, options.getInet6RouteRange()) == 0) builder.addRoute("::", 0);
             }
             addPackages(builder, options.getIncludePackage(), true);
             addPackages(builder, options.getExcludePackage(), false);
@@ -665,12 +716,15 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
         return count;
     }
 
-    private void addLegacyRoutes(Builder builder, RoutePrefixIterator iterator) {
-        if (iterator == null) return;
+    private int addLegacyRoutes(Builder builder, RoutePrefixIterator iterator) {
+        int count=0;
+        if (iterator == null) return count;
         while (iterator.hasNext()) {
             RoutePrefix route = iterator.next();
             builder.addRoute(route.address(), route.prefix());
+            count++;
         }
+        return count;
     }
 
     private void addPackages(Builder builder, StringIterator iterator, boolean allowed) {
@@ -818,20 +872,24 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
     private Network physicalNetwork() {
         Network preferred = underlyingNetwork;
         NetworkCapabilities preferredCaps = preferred == null ? null : connectivity.getNetworkCapabilities(preferred);
-        if (preferredCaps != null && preferredCaps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+        if (preferredCaps != null && preferredCaps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                && preferredCaps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
                 && !preferredCaps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return preferred;
+        Network transportFallback = null;
         Network fallback = null;
         for (Network network : connectivity.getAllNetworks()) {
             NetworkCapabilities caps = connectivity.getNetworkCapabilities(network);
             if (caps == null || !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
                     || !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
                     || caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue;
-            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+            boolean commonTransport=caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
                     || caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
-                    || caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) return network;
+                    || caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET);
+            if (commonTransport&&caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) return network;
+            if (commonTransport&&transportFallback==null)transportFallback=network;
             if (fallback == null) fallback = network;
         }
-        return fallback;
+        return transportFallback!=null?transportFallback:fallback;
     }
 
     private int interfaceFlags(java.net.NetworkInterface source, NetworkCapabilities caps) {
@@ -913,8 +971,8 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
 
         SharedPreferences prefs = getSharedPreferences("xvpn_preferences_v1", MODE_PRIVATE);
         if (!prefs.getBoolean("traffic_reporting", false)) return;
-        long interval = prefs.getLong("traffic_report_interval_seconds", 300L);
-        interval = Math.max(60L, Math.min(3600L, interval));
+        long interval = prefs.getLong("traffic_report_interval_seconds", 5L);
+        interval = Math.max(5L, Math.min(300L, interval));
         reportExecutor = Executors.newSingleThreadScheduledExecutor();
         reportExecutor.scheduleWithFixedDelay(() -> {
             ReportSnapshot report = currentReportSnapshot();
@@ -968,13 +1026,29 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
                     .put("download_total_bytes", Math.max(0L, report.downloadTotal))
                     .put("app_version", BuildConfig.VERSION_NAME);
             ApiClient.request(panel, "/traffic/report", "POST", auth, body);
+            if (versionBlockNotified.getAndSet(false)) {
+                updateForegroundNotification("XVPN 已连接", connectedNotificationText(0L, 0L), true);
+            }
         } catch (ApiClient.ApiException error) {
-            if (error.isAuthFailure()) {
+            if (error.isVersionBlocked()) {
+                // Keep an already verified tunnel alive long enough for the
+                // mandatory in-app updater to work under Android lockdown.
+                // MainActivity blocks every normal action until installation;
+                // tearing down here would leave a lockdown device with no path
+                // to download the required APK.
+                if (versionBlockNotified.compareAndSet(false, true)) {
+                    CoreState.notifyVersionBlocked(this);
+                    updateForegroundNotification("XVPN 需要更新",
+                            displayNodeName() + " · 请返回 App 完成更新", true);
+                }
+            } else if (error.isAuthFailure()) {
+                SecureVpnProfileStore.clear(this);
                 CoreState.notifyAuthInvalid(this, error.code);
                 requestStop();
             } else if ("INVALID_NODE_ID".equals(error.code)) {
                 // A final report from the previous hot-switched node must not tear down the new node.
                 if (report.sessionId.equals(sessionId)) {
+                    SecureVpnProfileStore.clear(this);
                     CoreState.notifyNodeInvalid(this);
                     requestStop();
                 }

@@ -53,7 +53,8 @@ final class ApiClient {
                         status,
                         json.optString("code", "HTTP_" + status),
                         safeServerMessage(status, json.optString("message", "")),
-                        json.optInt("retry_after", 0)
+                        json.optInt("retry_after", 0),
+                        json
                 );
             }
             return json;
@@ -105,6 +106,8 @@ final class ApiClient {
         conn.setRequestProperty("Cache-Control", "no-cache");
         conn.setRequestProperty("Pragma", "no-cache");
         conn.setRequestProperty("X-XVPN-Client", "android/" + BuildConfig.VERSION_NAME);
+        conn.setRequestProperty("X-XVPN-Version-Name", BuildConfig.VERSION_NAME);
+        conn.setRequestProperty("X-XVPN-Version-Code", String.valueOf(BuildConfig.VERSION_CODE));
     }
 
     static String normalizePanelBase(String value) {
@@ -174,17 +177,27 @@ final class ApiClient {
         final int status;
         final String code;
         final int retryAfter;
+        final JSONObject payload;
 
         ApiException(int status, String code, String message, int retryAfter) {
+            this(status, code, message, retryAfter, new JSONObject());
+        }
+
+        ApiException(int status, String code, String message, int retryAfter, JSONObject payload) {
             super(message);
             this.status = status;
             this.code = code;
             this.retryAfter = retryAfter;
+            this.payload = payload == null ? new JSONObject() : payload;
         }
 
         boolean isAuthFailure() {
             return "UNAUTHORIZED".equals(code) || "TOKEN_EXPIRED".equals(code) || "ACCOUNT_DISABLED".equals(code)
                     || "HTTP_401".equals(code) || "HTTP_403".equals(code);
+        }
+
+        boolean isVersionBlocked() {
+            return status == 426 || "APP_VERSION_UNSUPPORTED".equals(code);
         }
     }
 }

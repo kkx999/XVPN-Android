@@ -105,8 +105,9 @@ public final class SingBoxConfigBuilderTest {
         assertEquals("tun", tun.getString("type"));
         assertEquals(1400, tun.getInt("mtu"));
         assertEquals("mixed", tun.getString("stack"));
-        assertEquals(1, tun.getJSONArray("address").length());
+        assertEquals(2, tun.getJSONArray("address").length());
         assertTrue(tun.getJSONArray("address").getString(0).contains("172.19.0.1/30"));
+        assertTrue(tun.getJSONArray("address").getString(1).contains("fdfe:dcba:9876::1/126"));
 
         JSONObject dns = root.getJSONObject("dns");
         assertEquals("ipv4_only", dns.getString("strategy"));

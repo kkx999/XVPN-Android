@@ -127,6 +127,10 @@ final class AppUpdateChecker {
         final String pageUrl;
         final boolean forceUpdate;
         final String statusMessage;
+        final String apkUrl;
+        final String sha256;
+        final long apkSize;
+        final int versionCode;
 
         Result(boolean hasRelease, boolean updateAvailable, String version, String notes, String pageUrl) {
             this(hasRelease, updateAvailable, version, notes, pageUrl, false, "");
@@ -134,6 +138,13 @@ final class AppUpdateChecker {
 
         Result(boolean hasRelease, boolean updateAvailable, String version, String notes, String pageUrl,
                boolean forceUpdate, String statusMessage) {
+            this(hasRelease, updateAvailable, version, notes, pageUrl, forceUpdate, statusMessage,
+                    "", "", 0L, 0);
+        }
+
+        Result(boolean hasRelease, boolean updateAvailable, String version, String notes, String pageUrl,
+               boolean forceUpdate, String statusMessage, String apkUrl, String sha256,
+               long apkSize, int versionCode) {
             this.hasRelease = hasRelease;
             this.updateAvailable = updateAvailable;
             this.version = version;
@@ -141,6 +152,15 @@ final class AppUpdateChecker {
             this.pageUrl = pageUrl;
             this.forceUpdate = forceUpdate;
             this.statusMessage = statusMessage == null ? "" : statusMessage;
+            this.apkUrl = apkUrl == null ? "" : apkUrl.trim();
+            this.sha256 = sha256 == null ? "" : sha256.trim().toLowerCase(java.util.Locale.ROOT);
+            this.apkSize = Math.max(0L, apkSize);
+            this.versionCode = Math.max(0, versionCode);
+        }
+
+        boolean supportsVerifiedInAppInstall() {
+            return apkUrl.startsWith("https://") && sha256.matches("[0-9a-f]{64}")
+                    && versionCode > BuildConfig.VERSION_CODE;
         }
 
         static Result noRelease() { return new Result(false, false, "", "", "", false, ""); }

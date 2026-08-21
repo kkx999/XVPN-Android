@@ -49,22 +49,15 @@ final class RefreshActionView extends View {
         paint.setAlpha(dark ? 112 : 78);
         canvas.drawCircle(cx,cy,radius,paint);
 
-        float arcRadius=dp(8.2f);
+        float arcRadius=dp(8.4f);
         panelBounds.set(cx-arcRadius,cy-arcRadius,cx+arcRadius,cy+arcRadius);
         paint.setStrokeWidth(dp(2.05f));
         paint.setAlpha(230);
-        canvas.drawArc(panelBounds,-58f,286f,false,paint);
-        float ax=cx+arcRadius*.88f,ay=cy-arcRadius*.48f;
-        canvas.drawLine(ax,ay,ax-dp(4.1f),ay-dp(.3f),paint);
-        canvas.drawLine(ax,ay,ax-dp(1.5f),ay+dp(3.6f),paint);
-
-        if(spinner!=null&&spinner.isRunning()){
-            double angle=Math.toRadians(-58f+286f*phase);
-            paint.setStyle(Paint.Style.FILL);
-            paint.setAlpha(dark?225:205);
-            canvas.drawCircle(cx+(float)Math.cos(angle)*arcRadius,
-                    cy+(float)Math.sin(angle)*arcRadius,dp(1.65f),paint);
-        }
+        canvas.save();
+        if(spinner!=null&&spinner.isRunning())canvas.rotate(phase*360f,cx,cy);
+        drawArcArrow(canvas,cx,cy,arcRadius,-72f,132f);
+        drawArcArrow(canvas,cx,cy,arcRadius,108f,132f);
+        canvas.restore();
         paint.setStyle(Paint.Style.FILL);
         paint.setAlpha(255);
     }
@@ -92,8 +85,9 @@ final class RefreshActionView extends View {
         invalidate();
         animate().cancel();
         if (!ValueAnimator.areAnimatorsEnabled()) { setScaleX(1f); setScaleY(1f); return; }
-        animate().scaleX(1f).scaleY(1f).setDuration(210)
-                .setInterpolator(new DecelerateInterpolator()).start();
+        setScaleX(.94f);setScaleY(.94f);
+        animate().scaleX(1f).scaleY(1f).setDuration(300)
+                .setInterpolator(new android.view.animation.OvershootInterpolator(.65f)).start();
     }
 
     @Override protected void onDetachedFromWindow() {
@@ -106,4 +100,20 @@ final class RefreshActionView extends View {
     }
 
     private float dp(float v) { return v * getResources().getDisplayMetrics().density; }
+
+    private void drawArcArrow(Canvas canvas,float cx,float cy,float radius,float start,float sweep){
+        canvas.drawArc(panelBounds,start,sweep,false,paint);
+        double end=Math.toRadians(start+sweep);
+        float x=cx+(float)Math.cos(end)*radius;
+        float y=cy+(float)Math.sin(end)*radius;
+        double tangent=end+Math.PI/2d;
+        float back=dp(3.8f);
+        float wing=dp(2.6f);
+        float bx=x-(float)Math.cos(tangent)*back;
+        float by=y-(float)Math.sin(tangent)*back;
+        float nx=-(float)Math.sin(tangent);
+        float ny=(float)Math.cos(tangent);
+        canvas.drawLine(x,y,bx+nx*wing,by+ny*wing,paint);
+        canvas.drawLine(x,y,bx-nx*wing,by-ny*wing,paint);
+    }
 }

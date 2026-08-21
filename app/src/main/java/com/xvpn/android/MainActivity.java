@@ -64,6 +64,7 @@ import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class MainActivity extends android.app.Activity {
     private static final String PREFS = "xvpn_preferences_v1";
@@ -76,6 +77,7 @@ public final class MainActivity extends android.app.Activity {
     private static final int TAB_MINE = 1;
     private static final int REQUEST_VPN_PERMISSION = 509;
     private static final int REQUEST_NOTIFICATION_PERMISSION = 510;
+    private static final int REQUEST_INSTALL_PERMISSION = 511;
     private static final long UPDATE_CHECK_INTERVAL_MS = 12L * 60L * 60L * 1000L;
 
     private SharedPreferences prefs;
@@ -95,7 +97,11 @@ public final class MainActivity extends android.app.Activity {
     private volatile boolean refreshing = false;
     private FrameLayout currentRoot;
     private Dialog activeNodePicker;
+    private Dialog activeUpdateDialog;
     private volatile boolean updateCheckRunning = false;
+    private volatile boolean minimumVersionBlocked = false;
+    private volatile boolean pendingVerifiedInstall = false;
+    private AppUpdateChecker.Result blockedUpdate;
     private volatile boolean exitIpLoading = false;
     private volatile ExitIpClassifier.Info exitIpInfo;
     private volatile String exitIpSessionKey = "";
@@ -111,6 +117,12 @@ public final class MainActivity extends android.app.Activity {
     private boolean coreReceiverRegistered;
     private final BroadcastReceiver coreReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
+            if(CoreState.ACTION_VERSION_BLOCKED.equals(intent.getAction())){
+                minimumVersionBlocked=true;
+                toast("当前版本低于服务器最低要求，正在检查更新");
+                checkForUpdates(true);
+                return;
+            }
             if (CoreState.ACTION_AUTH_INVALID.equals(intent.getAction())) {
                 String code = intent.getStringExtra("code");
                 forceLogout(code == null ? "UNAUTHORIZED" : code, null);
@@ -152,7 +164,9 @@ public final class MainActivity extends android.app.Activity {
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        InAppUpdater.cleanStale(this);
         migrateLatencyTargetPreference();
+        migrateLatencyCache();
         baseUrl = loadManagedPanelBase();
         token = SecureTokenStore.load(prefs);
         routeMode = RouteMode.fromKey(prefs.getString("route_mode", "smart"));
@@ -180,6 +194,14 @@ public final class MainActivity extends android.app.Activity {
         if(normalized.isEmpty()||retired){
             prefs.edit().putString("latency_test_url",DEFAULT_LATENCY_URL).apply();
         }
+    }
+
+    /** Remove old tunnel-health values (often 1-5 ms) that were cached as node latency. */
+    private void migrateLatencyCache(){
+        if(prefs.getBoolean("latency_cache_entry_tcp_v2",false))return;
+        SharedPreferences.Editor edit=prefs.edit();
+        for(String key:new ArrayList<>(prefs.getAll().keySet()))if(key.startsWith("node_latency_"))edit.remove(key);
+        edit.putBoolean("latency_cache_entry_tcp_v2",true).apply();
     }
 
     /**
@@ -303,6 +325,13 @@ public final class MainActivity extends android.app.Activity {
             } catch (Exception e) {
                 runOnUiThread(() -> {
                     if (gen != screenGeneration || isFinishing()) return;
+                    if (e instanceof ApiClient.ApiException && ((ApiClient.ApiException)e).isVersionBlocked()) {
+                        AppUpdateChecker.Result required=updateResultFromJson(((ApiClient.ApiException)e).payload,true);
+                        minimumVersionBlocked=true;blockedUpdate=required;
+                        loading.setText("需要更新客户端…");
+                        finishLaunch(root,started,()->{showLogin("当前版本低于服务器最低要求");showUpdateSheet(required);});
+                        return;
+                    }
                     String message = (e instanceof ApiClient.ApiException && ((ApiClient.ApiException)e).isAuthFailure())
                             ? reauthMessage(((ApiClient.ApiException)e).code)
                             : "同步失败：" + apiMessage(e);
@@ -349,6 +378,7 @@ public final class MainActivity extends android.app.Activity {
         filter.addAction(CoreState.ACTION_AUTH_INVALID);
         filter.addAction(CoreState.ACTION_NODE_INVALID);
         filter.addAction(CoreState.ACTION_SWITCH_FAILED);
+        filter.addAction(CoreState.ACTION_VERSION_BLOCKED);
         registerReceiver(coreReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
         coreReceiverRegistered = true;
         refreshCoreBoundViews();
@@ -588,6 +618,10 @@ public final class MainActivity extends android.app.Activity {
                 runOnUiThread(() -> {
                     if (gen != screenGeneration) return;
                     setBusy(button, busy, false, "登录中…", "登录");
+                    if(e instanceof ApiClient.ApiException&&((ApiClient.ApiException)e).isVersionBlocked()){
+                        AppUpdateChecker.Result required=updateResultFromJson(((ApiClient.ApiException)e).payload,true);
+                        minimumVersionBlocked=true;blockedUpdate=required;showUpdateSheet(required);return;
+                    }
                     toast(apiMessage(e));
                 });
             }
@@ -669,7 +703,10 @@ public final class MainActivity extends android.app.Activity {
                     refreshing=false;
                     finishRefreshMotion();
                     if(gen!=screenGeneration)return;
-                    if(e instanceof ApiClient.ApiException && ((ApiClient.ApiException)e).isAuthFailure()) {
+                    if(e instanceof ApiClient.ApiException&&((ApiClient.ApiException)e).isVersionBlocked()){
+                        AppUpdateChecker.Result required=updateResultFromJson(((ApiClient.ApiException)e).payload,true);
+                        minimumVersionBlocked=true;blockedUpdate=required;showUpdateSheet(required);
+                    } else if(e instanceof ApiClient.ApiException && ((ApiClient.ApiException)e).isAuthFailure()) {
                         forceLogout(((ApiClient.ApiException)e).code, e.getMessage());
                     } else if (coldStart) {
                         showLogin("同步失败：" + apiMessage(e));
@@ -682,6 +719,8 @@ public final class MainActivity extends android.app.Activity {
     }
 
     private void acceptBootstrap(JSONObject boot) {
+        minimumVersionBlocked=false;
+        blockedUpdate=null;
         bootstrap=boot;
         JSONObject user=boot.optJSONObject("user");
         username=user==null?prefs.getString("last_username",""):user.optString("username","");
@@ -694,7 +733,7 @@ public final class MainActivity extends android.app.Activity {
             selectedNode=catalog.firstNode();
         }
         if(selectedNode!=null) edit.putInt("selected_node_id",selectedNode.id); else edit.remove("selected_node_id");
-        long reportInterval=Math.max(60L,Math.min(3600L,boot.optLong("traffic_report_interval_seconds",300L)));
+        long reportInterval=Math.max(5L,Math.min(300L,boot.optLong("traffic_report_interval_seconds",5L)));
         long updateInterval=Math.max(3600L,Math.min(7L*24L*3600L,boot.optLong("app_update_check_interval_seconds",43200L)));
         // Admin accounts were previously excluded here, which silently
         // disabled both Panel reports and the user's traffic cards.
@@ -705,7 +744,7 @@ public final class MainActivity extends android.app.Activity {
 
         CoreState.Snapshot core=CoreState.read(this);
         if(core.isActive() && core.nodeId>0 && catalog.find(core.nodeId)==null) {
-            VpnCoreService.stop(this);
+            VpnCoreService.stopAndForget(this);
             toast("当前连接节点已被停用，已安全断开");
         }
     }
@@ -755,6 +794,8 @@ private void showShell(int tab) {
         LinearLayout.LayoutParams rlp=new LinearLayout.LayoutParams(dp(42),dp(42)); header.addView(refresh,rlp); pressMotion(refresh,.94f);
         refresh.setOnClickListener(v->{
             if(refreshing)return;
+            if(nodeScanRunning){toast("节点测速进行中，请稍候刷新");return;}
+            if(CoreState.read(this).isBusy()){toast("当前配置正在切换，请稍候刷新");return;}
             refreshing=true;
             v.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
             refresh.startRefreshMotion();
@@ -957,7 +998,7 @@ private void setRouteMode(RouteMode mode) {
     private View exitIpCard(CoreState.Snapshot core) {
         LinearLayout block=column(); block.setTag("home_exit_ip_block");
         LinearLayout card=row(); card.setGravity(Gravity.CENTER_VERTICAL); card.setPadding(dp(15),dp(12),dp(12),dp(12)); card.setBackground(floatingCardBg(19));
-        TextView icon=text("◎",21,p.accent,true); icon.setGravity(Gravity.CENTER); icon.setBackground(roundRect(p.accentSoft,13,0,0)); card.addView(icon,new LinearLayout.LayoutParams(dp(42),dp(42)));
+        ExitIpIconView icon=new ExitIpIconView(this,p.dark,p.accent,p.accentSoft);card.addView(icon,new LinearLayout.LayoutParams(dp(42),dp(42)));
         LinearLayout labels=column(); LinearLayout.LayoutParams labelLp=new LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1f); labelLp.leftMargin=dp(11);
         TextView ip=text("正在识别出口…",14,p.ink,true); ip.setTag("home_exit_ip_value"); labels.addView(ip,matchWrap());
         TextView provider=text("连接后自动检测公网 IP 与网络属性",10,p.muted,false); provider.setTag("home_exit_ip_meta"); labels.addView(provider,matchWrap()); card.addView(labels,labelLp);
@@ -1251,6 +1292,10 @@ private void setRouteMode(RouteMode mode) {
     }
 
     private void handleConnect() {
+        if(minimumVersionBlocked){
+            if(blockedUpdate!=null)showUpdateSheet(blockedUpdate);else checkForUpdates(true);
+            return;
+        }
         CoreState.Snapshot core=CoreState.read(this);
         if(core.state==CoreState.RUNNING){
             VpnCoreService.stop(this);
@@ -1297,6 +1342,15 @@ private void setRouteMode(RouteMode mode) {
 
     @Override protected void onActivityResult(int requestCode,int resultCode,Intent data) {
         super.onActivityResult(requestCode,resultCode,data);
+        if(requestCode==REQUEST_INSTALL_PERMISSION){
+            if(!pendingVerifiedInstall)return;
+            if(Build.VERSION.SDK_INT>=Build.VERSION_CODES.O&&!getPackageManager().canRequestPackageInstalls()){
+                toast("未获得安装权限，可在更新卡片中再次尝试");return;
+            }
+            try{InAppUpdater.install(this,REQUEST_INSTALL_PERMISSION);}
+            catch(Exception error){toast("无法启动系统安装器，请重新下载");}
+            return;
+        }
         if(requestCode!=REQUEST_VPN_PERMISSION)return;
         if(resultCode==RESULT_OK) startPendingCore();
         else {
@@ -1426,6 +1480,7 @@ private void setRouteMode(RouteMode mode) {
         sheet.addView(actions,matchWrap());
 
         test.setOnClickListener(v->{
+            if(nodeScanRunning||refreshing){toast("节点列表正在更新或测速，请稍候");return;}
             test.setEnabled(false); test.setText("测速中…"); result.setText("正在测试节点入口…"); result.setTextColor(p.muted);
             io.execute(()->{
                 try{
@@ -1481,6 +1536,7 @@ private void setRouteMode(RouteMode mode) {
 
     private void testSelectedNodeQuick(TextView badge) {
         NodeCatalog.Node node=selectedNode; if(node==null){toast("当前没有可用节点");return;}
+        if(nodeScanRunning||refreshing){toast("节点列表正在更新或测速，请稍候");return;}
         if(CoreState.read(this).isBusy()){toast("当前配置正在切换，请稍候…");return;}
         badge.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK); badge.setEnabled(false); badge.setText("测速中");
         io.execute(()->{
@@ -1497,7 +1553,7 @@ private void setRouteMode(RouteMode mode) {
     }
 
     private void runBestNodeScan(boolean userInitiated) {
-        if(nodeScanRunning){if(userInitiated)toast("节点测速正在进行中");return;}
+        if(nodeScanRunning||refreshing){if(userInitiated)toast("节点列表正在更新或测速");return;}
         List<NodeCatalog.Node> nodes=new ArrayList<>(); for(NodeCatalog.Country c:catalog.countries)nodes.addAll(c.nodes);
         if(nodes.isEmpty()){if(userInitiated)toast("当前没有可测速节点");return;}
         nodeScanRunning=true; String scanToken=token;
@@ -1767,7 +1823,7 @@ private void setRouteMode(RouteMode mode) {
     }
 
     private void clearSessionLocal() {
-        VpnCoreService.stop(this);
+        VpnCoreService.stopAndForget(this);
         clearPendingCore();
         token=""; username=""; bootstrap=null; catalog=new NodeCatalog(); selectedNode=null; SecureTokenStore.clear(prefs); prefs.edit().remove("selected_node_id").remove("initial_best_node_scan_v1").remove("manual_node_selected").apply();
     }
@@ -1795,7 +1851,7 @@ private void setRouteMode(RouteMode mode) {
     }
 
     private void runBestNodeScanInPicker(Dialog dialog, TextView action, TextView status, SparseArray<TextView> latencyBadges, SparseArray<SelectionDotView> tails, SparseArray<View> items, boolean[] pickerChanged) {
-        if(nodeScanRunning){status.setVisibility(View.VISIBLE);status.setText("节点优选正在进行，请稍候…");return;}
+        if(nodeScanRunning||refreshing){status.setVisibility(View.VISIBLE);status.setText("节点列表正在更新或测速，请稍候…");return;}
         List<NodeCatalog.Node> nodes=new ArrayList<>(); for(NodeCatalog.Country c:catalog.countries)nodes.addAll(c.nodes);
         if(nodes.isEmpty()){status.setVisibility(View.VISIBLE);status.setText("当前没有可测速节点");return;}
         nodeScanRunning=true; beginScanAction(action); status.setVisibility(View.VISIBLE); status.setTextColor(p.muted);
@@ -2075,7 +2131,7 @@ private void setRouteMode(RouteMode mode) {
     }
 
     private AppUpdateChecker.Result checkUpdateSources() throws Exception {
-        // Panel v1.2.1 owns update policy; GitHub is used only when the endpoint is unavailable.
+        // Panel v1.2.2 owns update policy; GitHub is used only when the endpoint is unavailable.
         if(baseUrl!=null && !baseUrl.isEmpty()) {
             try {
                 String query="/app/update?version_name="+Uri.encode(BuildConfig.VERSION_NAME)+"&version_code="+BuildConfig.VERSION_CODE;
@@ -2083,15 +2139,8 @@ private void setRouteMode(RouteMode mode) {
                 if(!json.optBoolean("enabled",true)) {
                     return new AppUpdateChecker.Result(true,false,"","","",false,"服务器已暂停 App 更新检查");
                 }
-                String version=json.optString("latest_version_name",json.optString("version_name",json.optString("version",""))).trim();
-                if(!version.isEmpty()) {
-                    String notes=json.optString("release_notes",json.optString("releaseNotes",json.optString("changelog",json.optString("notes",json.optString("message",""))))).trim();
-                    String url=json.optString("apk_url",json.optString("download_url",json.optString("release_url",json.optString("url","")))).trim();
-                    boolean newer=json.has("update_available")?json.optBoolean("update_available",false):
-                            (json.optInt("version_code",0)>BuildConfig.VERSION_CODE || AppUpdateChecker.compareVersions(version,BuildConfig.VERSION_NAME)>0);
-                    boolean force=json.optBoolean("force_update",false)||json.optBoolean("must_update",false);
-                    return new AppUpdateChecker.Result(true,newer,AppUpdateChecker.normalizeVersion(version),notes,url,force,"");
-                }
+                AppUpdateChecker.Result parsed=updateResultFromJson(json,false);
+                if(parsed.hasRelease)return parsed;
             } catch(Exception panelUnavailable) {
                 // Panel owns update policy when reachable. A transient DNS/TLS/5xx
                 // failure must not suppress the signed GitHub Release fallback.
@@ -2100,10 +2149,39 @@ private void setRouteMode(RouteMode mode) {
         return AppUpdateChecker.check();
     }
 
+    private AppUpdateChecker.Result updateResultFromJson(JSONObject json,boolean forceOverride){
+        if(json==null)json=new JSONObject();
+        JSONObject latest=json.optJSONObject("latest");
+        if(latest==null)latest=new JSONObject();
+        String version=json.optString("latest_version_name",json.optString("version_name",
+                json.optString("version",latest.optString("version_name","")))).trim();
+        int versionCode=json.optInt("latest_version_code",json.optInt("version_code",
+                latest.optInt("version_code",0)));
+        String notes=json.optString("release_notes",json.optString("releaseNotes",
+                latest.optString("release_notes",json.optString("message","")))).trim();
+        String apkUrl=json.optString("apk_url",json.optString("download_url",
+                latest.optString("apk_url",""))).trim();
+        String releaseUrl=json.optString("release_url",json.optString("releaseUrl",
+                latest.optString("release_url",apkUrl))).trim();
+        String sha=json.optString("sha256",latest.optString("sha256","")).trim();
+        long size=json.optLong("apk_size",latest.optLong("apk_size",0L));
+        boolean newer=json.has("update_available")?json.optBoolean("update_available",false):
+                (versionCode>BuildConfig.VERSION_CODE||AppUpdateChecker.compareVersions(version,BuildConfig.VERSION_NAME)>0);
+        boolean force=forceOverride||json.optBoolean("force_update",false)||json.optBoolean("must_update",false);
+        String status=version.isEmpty()?json.optString("message","更新信息暂不可用"):"";
+        return new AppUpdateChecker.Result(!version.isEmpty(),newer||force,
+                AppUpdateChecker.normalizeVersion(version),notes,releaseUrl,force,status,
+                apkUrl,sha,size,versionCode);
+    }
+
     private void showUpdateSheet(AppUpdateChecker.Result result) {
+        if(activeUpdateDialog!=null&&activeUpdateDialog.isShowing())return;
         Dialog dialog=bottomDialog(); LinearLayout sheet=sheet();
-        boolean enforce=result.forceUpdate && isSafeExternalUrl(result.pageUrl);
+        activeUpdateDialog=dialog;
+        boolean enforce=result.forceUpdate;
         dialog.setCancelable(!enforce); dialog.setCanceledOnTouchOutside(!enforce);
+        AtomicBoolean cancelled=new AtomicBoolean(false);
+        dialog.setOnDismissListener(ignored->{cancelled.set(true);if(activeUpdateDialog==dialog)activeUpdateDialog=null;});
         LinearLayout updateHeader=row(); updateHeader.setGravity(Gravity.CENTER_VERTICAL);
         BrandMarkView updateLogo=brandMark(); updateHeader.addView(updateLogo,new LinearLayout.LayoutParams(dp(38),dp(38)));
         LinearLayout updateText=column(); LinearLayout.LayoutParams updateTextLp=new LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1f); updateTextLp.leftMargin=dp(10);
@@ -2114,11 +2192,54 @@ private void setRouteMode(RouteMode mode) {
         if(notes.isEmpty()) notes="新的正式版本已经发布。";
         if(notes.length()>700) notes=notes.substring(0,700)+"…";
         TextView body=text(notes,12,p.muted,false); body.setLineSpacing(dp(3),1f); sheet.addView(body,matchWrap()); gap(sheet,18);
-        LinearLayout actions=row(); Button open=primaryButton(enforce?"立即更新":"查看更新");
-        if(!enforce){Button later=secondaryButton("稍后");actions.addView(later,new LinearLayout.LayoutParams(0,dp(50),1f));gapH(actions,10);later.setOnClickListener(v->dialog.dismiss());}
+        ProgressBar progress=new ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal);progress.setMax(100);progress.setProgress(0);progress.setVisibility(View.GONE);sheet.addView(progress,new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,dp(5)));gap(sheet,9);
+        TextView status=text(result.supportsVerifiedInAppInstall()?"APK 将在 App 内下载并完成 SHA-256、包名与签名校验":"将使用系统浏览器打开官方 Release",11,p.muted,false);status.setGravity(Gravity.CENTER);sheet.addView(status,matchWrap());gap(sheet,12);
+        LinearLayout actions=row(); Button open=primaryButton(result.supportsVerifiedInAppInstall()?"下载并安装":isSafeExternalUrl(result.pageUrl)?"前往安全下载":"重新检查");
+        if(!enforce){Button later=secondaryButton("稍后");actions.addView(later,new LinearLayout.LayoutParams(0,dp(50),1f));gapH(actions,10);later.setOnClickListener(v->{cancelled.set(true);dialog.dismiss();});}
         actions.addView(open,new LinearLayout.LayoutParams(0,dp(50),1f)); sheet.addView(actions,matchWrap());
-        open.setOnClickListener(v->{if(!enforce)dialog.dismiss();openExternalUrl(result.pageUrl);});
-        showBottomDialog(dialog,sheet);
+        final boolean[] ready={false};
+        open.setOnClickListener(v->{
+            if(ready[0]){
+                try{
+                    pendingVerifiedInstall=true;
+                    boolean launched=InAppUpdater.install(this,REQUEST_INSTALL_PERMISSION);
+                    status.setText(launched?"已交给 Android 系统安装器":"请允许 XVPN 安装更新，返回后会继续");
+                    status.setTextColor(launched?p.success:p.warningText);
+                }catch(Exception error){status.setText("无法启动安装器，请重新下载");status.setTextColor(p.danger);ready[0]=false;open.setText("重新下载");}
+                return;
+            }
+            if(!result.supportsVerifiedInAppInstall()){
+                if(isSafeExternalUrl(result.pageUrl)){if(!enforce)dialog.dismiss();openExternalUrl(result.pageUrl);}
+                else{status.setText("更新信息暂不可用，请稍后重新检查");status.setTextColor(p.danger);checkForUpdates(false);}
+                return;
+            }
+            cancelled.set(false);open.setEnabled(false);open.setAlpha(.76f);open.setText("下载中…");progress.setVisibility(View.VISIBLE);status.setText("正在建立安全下载连接…");status.setTextColor(p.muted);
+            io.execute(()->{
+                final long[] lastUi={0L};
+                try{
+                    InAppUpdater.downloadAndVerify(this,result,cancelled,(downloaded,total,stage)->{
+                        long now=SystemClock.elapsedRealtime();
+                        if(downloaded>0&&total>0&&downloaded<total&&now-lastUi[0]<120L)return;
+                        lastUi[0]=now;
+                        runOnUiThread(()->{
+                            if(!dialog.isShowing())return;
+                            if(total>0){progress.setIndeterminate(false);progress.setProgress((int)Math.min(100L,downloaded*100L/total));status.setText(stage+" · "+(downloaded*100L/Math.max(1L,total))+"%");}
+                            else{progress.setIndeterminate(true);status.setText(stage+" · "+formatBytesCompact(downloaded));}
+                        });
+                    });
+                    runOnUiThread(()->{
+                        if(!dialog.isShowing())return;
+                        ready[0]=true;pendingVerifiedInstall=true;progress.setIndeterminate(false);progress.setProgress(100);open.setEnabled(true);open.setAlpha(1f);open.setText("安装更新");status.setText("安全校验通过 · 点击安装");status.setTextColor(p.success);popResult(open);
+                    });
+                }catch(Exception error){
+                    runOnUiThread(()->{
+                        if(!dialog.isShowing())return;
+                        progress.setIndeterminate(false);progress.setVisibility(View.GONE);open.setEnabled(true);open.setAlpha(1f);open.setText("重新下载");String message=error instanceof InterruptedException?"下载已取消":(error.getMessage()==null?"下载或校验失败":error.getMessage());status.setText(message);status.setTextColor(p.danger);
+                    });
+                }
+            });
+        });
+        showBottomDialog(dialog,sheet,!enforce);
     }
 
     private void openExternalUrl(String url) {
@@ -2339,8 +2460,11 @@ private android.graphics.drawable.Drawable floatingCardBg(float radius){
         if(!p.dark)flags|=View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;else flags&=~View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
         window.getDecorView().setSystemUiVisibility(flags);
     }
-    private void showBottomDialog(Dialog d,LinearLayout sheet){
-        ScrollView scroll=polishedScrollView(false); scroll.addView(sheet,matchWrap()); d.setContentView(scroll);
+    private void showBottomDialog(Dialog d,LinearLayout sheet){showBottomDialog(d,sheet,true);}
+    private void showBottomDialog(Dialog d,LinearLayout sheet,boolean allowDragDismiss){
+        DismissibleBottomSheetScrollView scroll=new DismissibleBottomSheetScrollView(this);scroll.addView(sheet,matchWrap());d.setContentView(scroll);
+        final float baseDim=p.dark?.38f:.25f;
+        scroll.configure(sheet,allowDragDismiss?d::dismiss:null,progress->{Window window=d.getWindow();if(window!=null&&d.isShowing())window.setDimAmount(baseDim*(1f-progress));});
         if(d instanceof PremiumBottomDialog)((PremiumBottomDialog)d).setMotionTarget(sheet);
         d.setOnShowListener(x->{
             Window w=d.getWindow();
@@ -2353,10 +2477,10 @@ private android.graphics.drawable.Drawable floatingCardBg(float radius){
                 w.setLayout(WindowManager.LayoutParams.MATCH_PARENT,desired); w.setGravity(Gravity.BOTTOM);
             }
             sheet.setElevation(dp(p.dark?22:14));
-            if(!motionEnabled()){sheet.setAlpha(1f);sheet.setTranslationY(0f);sheet.setScaleX(1f);sheet.setScaleY(1f);if(w!=null)w.setDimAmount(p.dark?.38f:.25f);return;}
+            if(!motionEnabled()){sheet.setAlpha(1f);sheet.setTranslationY(0f);sheet.setScaleX(1f);sheet.setScaleY(1f);if(w!=null)w.setDimAmount(baseDim);return;}
             sheet.setPivotX(sheet.getMeasuredWidth()/2f);sheet.setPivotY(sheet.getMeasuredHeight());sheet.setAlpha(.24f);sheet.setTranslationY(dp(52));sheet.setScaleX(.968f);sheet.setScaleY(.968f);
             sheet.animate().alpha(1f).translationY(0f).scaleX(1f).scaleY(1f).setDuration(360).setInterpolator(new PathInterpolator(.16f,1f,.30f,1f)).start();
-            if(w!=null){ValueAnimator dim=ValueAnimator.ofFloat(0f,p.dark?.38f:.25f);dim.setDuration(260);dim.setInterpolator(new android.view.animation.DecelerateInterpolator());dim.addUpdateListener(a->{if(d.isShowing()&&d.getWindow()!=null)d.getWindow().setDimAmount((float)a.getAnimatedValue());});dim.start();}
+            if(w!=null){ValueAnimator dim=ValueAnimator.ofFloat(0f,baseDim);dim.setDuration(260);dim.setInterpolator(new android.view.animation.DecelerateInterpolator());dim.addUpdateListener(a->{if(d.isShowing()&&d.getWindow()!=null)d.getWindow().setDimAmount((float)a.getAnimatedValue());});dim.start();}
         });
         d.show();
     }
@@ -2367,7 +2491,7 @@ private android.graphics.drawable.Drawable floatingCardBg(float radius){
         void setMotionTarget(View target){motionTarget=target;}
         @Override public void dismiss(){
             if(exiting||!isShowing()||motionTarget==null||!motionEnabled()||MainActivity.this.isFinishing()){finishDismiss();return;}
-            exiting=true;motionTarget.animate().cancel();motionTarget.animate().alpha(0f).translationY(dp(24)).scaleX(.985f).scaleY(.985f).setDuration(170).setInterpolator(new android.view.animation.AccelerateInterpolator()).withEndAction(this::finishDismiss).start();
+            exiting=true;motionTarget.animate().cancel();float targetY=Math.max(motionTarget.getTranslationY()+dp(24),dp(64));motionTarget.animate().alpha(0f).translationY(targetY).scaleX(.985f).scaleY(.985f).setDuration(170).setInterpolator(new android.view.animation.AccelerateInterpolator()).withEndAction(this::finishDismiss).start();
             Window window=getWindow();if(window!=null){float start=window.getAttributes().dimAmount;dimExit=ValueAnimator.ofFloat(start,0f);dimExit.setDuration(170);dimExit.addUpdateListener(a->{if(isShowing()&&getWindow()!=null)getWindow().setDimAmount((float)a.getAnimatedValue());});dimExit.start();}
         }
         private void finishDismiss(){if(dimExit!=null){dimExit.cancel();dimExit=null;}try{super.dismiss();}finally{exiting=false;}}
