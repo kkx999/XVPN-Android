@@ -1,28 +1,24 @@
 # Third-party notices
 
-## sing-box / libbox 1.13.19
+## Mihomo / libmihomo-android
 
-This 1.0.0 source package includes `app/libs/libbox-1.13.19-arm64.aar`, containing the Android/arm64 libbox native library and its generated Java bindings.
+This Mihomo migration build uses `libmihomo-android` wrapper `v0.3.1`, which embeds Mihomo (the maintained Clash Meta successor) `v1.19.28` and exposes the Android JNI bridge used by XVPN.
 
-- Upstream project: https://github.com/SagerNet/sing-box
-- Android client: https://github.com/SagerNet/sing-box-for-android
-- Release: https://github.com/SagerNet/sing-box/releases/tag/v1.13.19
-- Corresponding source tag: https://github.com/SagerNet/sing-box/archive/refs/tags/v1.13.19.tar.gz
-- Upstream source revision: `b5ebaa1fc0f2b94256180b95468e73ef53caa27d`
-- Official Android client tag revision: `aed2b6ea126e627fca2c6189a944000dcf5315b5`
-- Official `SFA-1.13.19-arm64-v8a.apk` SHA-256: `6e07580500a0e74881d7d8fc3b4ef9d88dce8e65c8d44a4a41be839fbaeaeaf5`
-- Bundled AAR SHA-256: `9b73fc5fb5591e9b0f269ae04685daa9ece38e95452454bf642f8140fa769ca8`
-- Bundled `libbox.so` SHA-256: `a54962a1ecc2f3d6b2311903dc80993d7aa7f5327d5bbb06a61899e420326aaa`
+- Mihomo upstream: https://github.com/MetaCubeX/mihomo
+- Android JNI wrapper: https://github.com/oviron/libmihomo-android
+- Wrapper release: `v0.3.1`
+- Bundled Mihomo core: `v1.19.28`
+- Bridge ABI: `3`
+- XVPN build downloads the pinned AAR from the wrapper's GitHub Release and verifies it against the release `.sha256` file before compilation.
+- XVPN currently packages only the `arm64-v8a` libraries from that AAR.
 
-The bundled AAR was assembled from the native library and generated bindings in the official SFA 1.13.19 arm64 release APK. The APK-generated `go.libbox.gojni.R` class is intentionally excluded because Android Gradle Plugin generates the AAR resource class from its namespace; bundling both copies causes a duplicate-class DEX failure. It is not claimed as an XVPN-authored component.
+`libmihomo-android` and Mihomo are distributed under GNU GPL version 3. The full GPL-3.0 text remains in `licenses/GPL-3.0.txt`. XVPN uses its own name and does not imply endorsement by Mihomo, MetaCubeX, or the wrapper maintainer.
 
-sing-box is distributed under GNU GPL version 3 or later. Upstream also states that derivative works may not use its application name or imply association without prior consent. This client uses the independent XVPN name and does not imply upstream endorsement or association.
-
-The full GPL-3.0 text is in `licenses/GPL-3.0.txt`; the upstream project notice is in `licenses/sing-box-LICENSE.txt`.
+The previous sing-box/libbox AAR can remain in the source tree while this migration branch is tested, but it is not an Android runtime dependency of the Mihomo build and the CI verifies that `libbox.so` is absent from the generated Mihomo APK.
 
 ## SagerNet routing rule sets
 
-XVPN 1.0.0 bundles two official sing-box binary rule sets so Smart Routing is available on the first connection and does not depend on a background rule download:
+The repository still contains the two previously pinned sing-box binary rule assets while the Mihomo migration is being validated:
 
 - `app/src/main/assets/rules/geosite-geolocation-cn.srs`
   - Upstream: https://github.com/SagerNet/sing-geosite
@@ -33,4 +29,4 @@ XVPN 1.0.0 bundles two official sing-box binary rule sets so Smart Routing is av
   - Pinned revision: `b9c5e675b4d5359d4b47f4434fa7ae77e9991306`
   - SHA-256: `0acf5dad38fba9db2dade29ce5e4edc6902220944f30628ae46ed16cb0ec5edd`
 
-Both rule repositories are distributed under GNU GPL version 3 or later. The bundled GPL-3.0 text applies to these data files as well.
+These `.srs` files are not consumed by Mihomo in the first migration test build; they are retained temporarily so the existing sing-box baseline can be compared and restored without reconstructing source assets. Both rule repositories are distributed under GNU GPL version 3 or later.
