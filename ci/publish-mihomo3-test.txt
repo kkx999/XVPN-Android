@@ -1,5 +1,0 @@
-artifact_id=9475124671
-run_id=32570161333
-tag=v1.1.1-mihomo3-test
-target=2532215802e1fb3a1c1b60466dbc65c775bf1648
-retry=1
