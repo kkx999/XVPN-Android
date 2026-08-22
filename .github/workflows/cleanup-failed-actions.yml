@@ -1,0 +1,79 @@
+name: Cleanup Failed Actions
+
+on:
+  push:
+    branches:
+      - dev/mihomo-core-v1
+    paths:
+      - ci/cleanup-failed-actions.txt
+
+permissions:
+  actions: write
+  contents: write
+
+jobs:
+  cleanup:
+    name: Delete failed workflow runs
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Delete completed failed runs
+        id: cleanup
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mapfile -t RUN_IDS < <(
+            gh api --paginate \
+              -H 'Accept: application/vnd.github+json' \
+              "repos/${GITHUB_REPOSITORY}/actions/runs?status=completed&per_page=100" \
+              --jq '.workflow_runs[] | select(.conclusion == "failure") | .id'
+          )
+
+          echo "Found ${#RUN_IDS[@]} failed workflow run(s)."
+          printf '%s\n' "${RUN_IDS[@]:-}" > /tmp/failed-run-ids.txt
+
+          deleted=0
+          for run_id in "${RUN_IDS[@]}"; do
+            [ -n "$run_id" ] || continue
+            echo "Deleting failed run $run_id"
+            gh api --method DELETE \
+              -H 'Accept: application/vnd.github+json' \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}"
+            deleted=$((deleted + 1))
+          done
+          echo "deleted=$deleted" >> "$GITHUB_OUTPUT"
+
+      - name: Verify no failed runs remain and record receipt
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DELETED: ${{ steps.cleanup.outputs.deleted }}
+        run: |
+          set -euo pipefail
+          remaining="$(
+            gh api --paginate \
+              -H 'Accept: application/vnd.github+json' \
+              "repos/${GITHUB_REPOSITORY}/actions/runs?status=completed&per_page=100" \
+              --jq '[.workflow_runs[] | select(.conclusion == "failure")] | length' \
+              | awk '{s+=$1} END {print s+0}'
+          )"
+          test "$remaining" -eq 0
+
+          mkdir -p ci
+          {
+            echo "cleanup=success"
+            echo "deleted=${DELETED:-0}"
+            echo "remaining_failed=0"
+            echo "cleanup_run=${GITHUB_RUN_ID}"
+            echo "updated_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > ci/cleanup-failed-actions-status.txt
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- ci/cleanup-failed-actions-status.txt
+          git commit -m 'chore: record failed Actions cleanup [skip ci]'
+          git push origin HEAD:dev/mihomo-core-v1
