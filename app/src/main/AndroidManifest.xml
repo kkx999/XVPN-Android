@@ -18,6 +18,11 @@
         android:supportsRtl="true"
         android:theme="@style/AppTheme"
         android:usesCleartextTraffic="${usesCleartextTraffic}">
+        <provider
+            android:name=".MihomoRuleProvider"
+            android:authorities="${applicationId}.mihomo-rules"
+            android:exported="false"
+            android:initOrder="100" />
         <activity
             android:name=".MainActivity"
             android:exported="true">
