@@ -8,6 +8,40 @@ def releaseKeyAlias = System.getenv('XVPN_KEY_ALIAS')
 def releaseKeyPassword = System.getenv('XVPN_KEY_PASSWORD')
 def isReleaseBuild = gradle.startParameter.taskNames.any { it.toLowerCase().contains('release') }
 
+def mihomoWrapperVersion = '0.3.1'
+def mihomoAar = file("libs/libmihomo-android-v${mihomoWrapperVersion}.aar")
+def mihomoSha = file("libs/libmihomo-android-v${mihomoWrapperVersion}.aar.sha256")
+
+tasks.register('downloadMihomo') {
+    inputs.property('mihomoWrapperVersion', mihomoWrapperVersion)
+    outputs.files(mihomoAar, mihomoSha)
+    doLast {
+        mihomoAar.parentFile.mkdirs()
+        def base = "https://github.com/oviron/libmihomo-android/releases/download/v${mihomoWrapperVersion}"
+        new URL("${base}/libmihomo-android-v${mihomoWrapperVersion}.aar").withInputStream { input ->
+            mihomoAar.withOutputStream { output -> output << input }
+        }
+        new URL("${base}/libmihomo-android-v${mihomoWrapperVersion}.aar.sha256").withInputStream { input ->
+            mihomoSha.withOutputStream { output -> output << input }
+        }
+        def expected = mihomoSha.text.trim().split(/\s+/)[0].toLowerCase(Locale.ROOT)
+        def digest = java.security.MessageDigest.getInstance('SHA-256')
+        mihomoAar.withInputStream { input ->
+            byte[] buffer = new byte[1024 * 1024]
+            int read
+            while ((read = input.read(buffer)) > 0) digest.update(buffer, 0, read)
+        }
+        def actual = digest.digest().collect { String.format('%02x', it & 0xff) }.join()
+        if (!expected.matches('[0-9a-f]{64}') || actual != expected) {
+            mihomoAar.delete()
+            throw new GradleException("Mihomo AAR SHA-256 verification failed: expected ${expected}, got ${actual}")
+        }
+        logger.lifecycle("Verified libmihomo-android v${mihomoWrapperVersion}: ${actual}")
+    }
+}
+
+tasks.named('preBuild').configure { dependsOn tasks.named('downloadMihomo') }
+
 if (isReleaseBuild && (!releaseKeystoreFile || !releaseStorePassword || !releaseKeyAlias || !releaseKeyPassword)) {
     throw new GradleException('Release signing is not configured. Set XVPN_KEYSTORE_FILE, XVPN_KEYSTORE_PASSWORD, XVPN_KEY_ALIAS, and XVPN_KEY_PASSWORD.')
 }
@@ -20,12 +54,11 @@ android {
         applicationId 'com.xvpn.android'
         minSdk 26
         targetSdk 36
-        versionCode 10101
-        versionName '1.1.1-rc1'
-        // The user-selectable latency target supports Apple's HTTP success
-        // page. Panel API validation remains HTTPS-only in release builds.
+        versionCode 10102
+        versionName '1.1.1-mihomo1'
         manifestPlaceholders = [usesCleartextTraffic: 'true']
-        // The bundled libbox AAR is intentionally single-ABI.
+        // XVPN currently publishes arm64-only APKs; the pinned Mihomo AAR also
+        // contains armeabi-v7a/x86_64, which AGP strips because of this filter.
         ndk { abiFilters 'arm64-v8a' }
     }
 
@@ -42,9 +75,6 @@ android {
 
     buildTypes {
         debug {
-            // Debug can be used with a temporary HTTP Panel during local development.
-            // Panel API remains HTTPS-only in release; the HTTP allowance is
-            // solely for the user-selected latency target.
             manifestPlaceholders = [usesCleartextTraffic: 'true']
             applicationIdSuffix '.debug'
             versionNameSuffix '-debug'
@@ -63,7 +93,7 @@ android {
 
     packaging {
         jniLibs {
-            useLegacyPackaging = true
+            useLegacyPackaging = false
         }
     }
 
@@ -74,9 +104,8 @@ android {
 }
 
 dependencies {
-    implementation files('libs/libbox-1.13.19-arm64.aar')
+    implementation files(mihomoAar)
+    implementation 'org.jetbrains.kotlin:kotlin-stdlib:2.2.10'
     testImplementation 'junit:junit:4.13.2'
-    // Android's local-test stubs do not implement org.json. Keep a real JVM
-    // implementation test-only so protocol/config generation can be verified.
     testImplementation 'org.json:json:20240303'
 }
