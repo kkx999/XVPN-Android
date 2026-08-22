@@ -1,0 +1,199 @@
+name: Apply Mihomo5 Sheet and Exit Icon Patch
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ github.event.head_commit.message == 'chore: apply mihomo5 sheet and icon patch' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: dev/mihomo-core-v1
+          fetch-depth: 0
+
+      - name: Apply adaptive sheet height and exit IP icon refresh
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def once(s, old, new, label):
+              if new in s:
+                  return s
+              if old not in s:
+                  raise SystemExit(label + ' anchor missing')
+              return s.replace(old, new, 1)
+
+          p=Path('app/src/main/java/com/xvpn/android/DismissibleBottomSheetScrollView.java')
+          s=p.read_text()
+          s=once(s,
+              '    private ProgressListener listener;\n',
+              '    private ProgressListener listener;\n    private Runnable contentHeightChanged;\n',
+              'height listener field')
+          s=once(s,
+              '    void configure(View target,Runnable dismiss,ProgressListener listener){\n        this.target=target;this.dismiss=dismiss;this.listener=listener;\n        // The node picker persists manual country toggles for the current open\n        // sheet, but every new picker should start with only the selected\n        // node\'s country expanded. Other bottom sheets have no SelectionDotView\n        // descendants and are therefore left untouched.\n        post(this::resetNodePickerExpansionIfPresent);\n    }',
+              '''    void configure(View target,Runnable dismiss,ProgressListener listener,Runnable contentHeightChanged){
+        this.target=target;this.dismiss=dismiss;this.listener=listener;this.contentHeightChanged=contentHeightChanged;
+        // Collapse non-selected countries before the dialog performs its first
+        // height measurement. Delaying this until post() made the window keep
+        // the height of previously expanded rows, leaving a large blank area.
+        resetNodePickerExpansionIfPresent();
+        if(target!=null){
+            target.addOnLayoutChangeListener((view,left,top,right,bottom,oldLeft,oldTop,oldRight,oldBottom)->{
+                if(bottom-top!=oldBottom-oldTop && this.contentHeightChanged!=null) post(this.contentHeightChanged);
+            });
+        }
+        if(this.contentHeightChanged!=null)post(this.contentHeightChanged);
+    }''',
+              'configure height callback')
+          p.write_text(s)
+
+          p=Path('app/src/main/java/com/xvpn/android/MainActivity.java')
+          s=p.read_text()
+          old='''        DismissibleBottomSheetScrollView scroll=new DismissibleBottomSheetScrollView(this);scroll.addView(sheet,matchWrap());d.setContentView(scroll);
+        final float baseDim=p.dark?.38f:.25f;
+        scroll.configure(sheet,allowDragDismiss?d::dismiss:null,progress->{Window window=d.getWindow();if(window!=null&&d.isShowing())window.setDimAmount(baseDim*(1f-progress));});'''
+          new='''        DismissibleBottomSheetScrollView scroll=new DismissibleBottomSheetScrollView(this);scroll.addView(sheet,matchWrap());d.setContentView(scroll);
+        final float baseDim=p.dark?.38f:.25f;
+        Runnable syncHeight=()->syncBottomDialogHeight(d,sheet);
+        scroll.configure(sheet,allowDragDismiss?d::dismiss:null,progress->{Window window=d.getWindow();if(window!=null&&d.isShowing())window.setDimAmount(baseDim*(1f-progress));},syncHeight);'''
+          s=once(s,old,new,'dialog configure')
+          old='''            if(w!=null){
+                styleDialogNavigationBar(w);
+                int maxH=(int)(getResources().getDisplayMetrics().heightPixels*.84f);
+                int width=getResources().getDisplayMetrics().widthPixels;
+                sheet.measure(View.MeasureSpec.makeMeasureSpec(width,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(maxH,View.MeasureSpec.AT_MOST));
+                int desired=Math.min(sheet.getMeasuredHeight(),maxH);
+                w.setLayout(WindowManager.LayoutParams.MATCH_PARENT,desired); w.setGravity(Gravity.BOTTOM);
+            }'''
+          new='''            if(w!=null){
+                styleDialogNavigationBar(w);
+                syncBottomDialogHeight(d,sheet);
+            }'''
+          s=once(s,old,new,'dialog initial height')
+          anchor='''    private void showBottomDialog(Dialog d,LinearLayout sheet){showBottomDialog(d,sheet,true);}'''
+          helper='''    private void syncBottomDialogHeight(Dialog d,LinearLayout sheet){
+        Window w=d.getWindow();
+        if(w==null||!d.isShowing())return;
+        int maxH=(int)(getResources().getDisplayMetrics().heightPixels*.84f);
+        int width=getResources().getDisplayMetrics().widthPixels;
+        sheet.measure(View.MeasureSpec.makeMeasureSpec(width,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(0,View.MeasureSpec.UNSPECIFIED));
+        int desired=Math.max(dp(120),Math.min(sheet.getMeasuredHeight(),maxH));
+        WindowManager.LayoutParams attrs=w.getAttributes();
+        if(attrs.height!=desired){w.setLayout(WindowManager.LayoutParams.MATCH_PARENT,desired);w.setGravity(Gravity.BOTTOM);}
+    }
+    private void showBottomDialog(Dialog d,LinearLayout sheet){showBottomDialog(d,sheet,true);}'''
+          s=once(s,anchor,helper,'height helper')
+          p.write_text(s)
+
+          p=Path('app/build.gradle');s=p.read_text()
+          s=once(s,"        versionCode 10105\n        versionName '1.1.1-mihomo4'","        versionCode 10106\n        versionName '1.1.1-mihomo5'",'version bump')
+          p.write_text(s)
+          Path('VERSION').write_text('1.1.1-mihomo5\n')
+
+          p=Path('.github/workflows/build-apk.yml');s=p.read_text()
+          s=once(s,"            grep -Fq \"versionName '1.1.1-mihomo4'\" app/build.gradle","            grep -Fq \"versionName '1.1.1-mihomo5'\" app/build.gradle",'CI version')
+          marker="            grep -Fq 'if(handleGesture)return true;' app/src/main/java/com/xvpn/android/DismissibleBottomSheetScrollView.java\n"
+          if "grep -Fq 'syncBottomDialogHeight'" not in s:
+              if marker not in s: raise SystemExit('CI sheet marker missing')
+              s=s.replace(marker,marker+"            grep -Fq 'syncBottomDialogHeight' app/src/main/java/com/xvpn/android/MainActivity.java\n            grep -Fq 'contentHeightChanged' app/src/main/java/com/xvpn/android/DismissibleBottomSheetScrollView.java\n",1)
+          p.write_text(s)
+          PY
+
+          cat > app/src/main/java/com/xvpn/android/ExitIpIconView.java <<'JAVA'
+          package com.xvpn.android;
+
+          import android.content.Context;
+          import android.graphics.Canvas;
+          import android.graphics.LinearGradient;
+          import android.graphics.Paint;
+          import android.graphics.Path;
+          import android.graphics.RectF;
+          import android.graphics.Shader;
+          import android.view.View;
+
+          /** Crystalline egress locator matching XVPN's ice-blue / violet visual language. */
+          final class ExitIpIconView extends View {
+              private final Paint paint=new Paint(Paint.ANTI_ALIAS_FLAG|Paint.DITHER_FLAG);
+              private final int accent;
+              private final int soft;
+              private final boolean dark;
+              private final RectF box=new RectF();
+              private final Path pin=new Path();
+
+              ExitIpIconView(Context context,boolean dark,int accent,int soft){
+                  super(context);this.dark=dark;this.accent=accent;this.soft=soft;
+                  setContentDescription("当前出口 IP");
+              }
+
+              @Override protected void onDraw(Canvas canvas){
+                  float w=getWidth(),h=getHeight(),cx=w/2f,cy=h/2f;
+                  float side=Math.min(w,h),radius=side*.30f;
+                  int violet=dark?0xFF9A7CFF:0xFF765EDB;
+
+                  // Quiet frosted tile instead of the old generic globe badge.
+                  float inset=side*.055f;
+                  box.set(inset,inset,w-inset,h-inset);
+                  paint.setShader(null);paint.setStyle(Paint.Style.FILL);paint.setColor(soft);paint.setAlpha(dark?185:228);
+                  canvas.drawRoundRect(box,side*.27f,side*.27f,paint);
+                  paint.setStyle(Paint.Style.STROKE);paint.setStrokeWidth(dp(1.05f));paint.setAlpha(dark?135:105);
+                  paint.setShader(new LinearGradient(box.left,box.top,box.right,box.bottom,accent,violet,Shader.TileMode.CLAMP));
+                  canvas.drawRoundRect(box,side*.27f,side*.27f,paint);
+
+                  // A restrained route orbit keeps the network meaning without globe clutter.
+                  paint.setStyle(Paint.Style.STROKE);paint.setStrokeCap(Paint.Cap.ROUND);paint.setStrokeWidth(dp(1.25f));paint.setAlpha(dark?105:82);
+                  box.set(cx-radius*1.18f,cy-radius*.84f,cx+radius*1.18f,cy+radius*.84f);
+                  canvas.drawArc(box,-28f,238f,false,paint);
+
+                  // Gradient locator: the exit address / region anchor.
+                  float top=cy-radius*.86f,bottom=cy+radius*.92f,left=cx-radius*.70f,right=cx+radius*.70f;
+                  pin.reset();pin.moveTo(cx,bottom);
+                  pin.cubicTo(cx-radius*.18f,cy+radius*.56f,left,cy+radius*.12f,left,cy-radius*.16f);
+                  pin.cubicTo(left,top+radius*.10f,cx-radius*.34f,top,cx,top);
+                  pin.cubicTo(cx+radius*.34f,top,right,top+radius*.10f,right,cy-radius*.16f);
+                  pin.cubicTo(right,cy+radius*.12f,cx+radius*.18f,cy+radius*.56f,cx,bottom);
+                  pin.close();
+                  paint.setStyle(Paint.Style.FILL);paint.setAlpha(242);
+                  paint.setShader(new LinearGradient(left,top,right,bottom,accent,violet,Shader.TileMode.CLAMP));
+                  canvas.drawPath(pin,paint);
+
+                  paint.setShader(null);paint.setColor(dark?0xFFEFF3FF:0xFFFFFFFF);paint.setAlpha(248);
+                  canvas.drawCircle(cx,cy-radius*.13f,radius*.24f,paint);
+                  paint.setStyle(Paint.Style.STROKE);paint.setStrokeWidth(dp(.9f));paint.setColor(dark?0xFFCAD6FF:0xFFDDE5FF);paint.setAlpha(190);
+                  canvas.drawCircle(cx,cy-radius*.13f,radius*.34f,paint);
+
+                  // Small exit glint, aligned with the brand's crystalline accents.
+                  paint.setStyle(Paint.Style.FILL);paint.setColor(violet);paint.setAlpha(220);
+                  canvas.drawCircle(cx+radius*.92f,cy-radius*.63f,dp(1.8f),paint);
+                  paint.setStyle(Paint.Style.STROKE);paint.setStrokeWidth(dp(.85f));paint.setColor(accent);paint.setAlpha(120);
+                  canvas.drawCircle(cx+radius*.92f,cy-radius*.63f,dp(3.1f),paint);
+                  paint.setShader(null);paint.setAlpha(255);
+              }
+
+              private float dp(float value){return value*getResources().getDisplayMetrics().density;}
+          }
+          JAVA
+
+          git diff --check
+          grep -Fq "versionName '1.1.1-mihomo5'" app/build.gradle
+          grep -Fq 'syncBottomDialogHeight' app/src/main/java/com/xvpn/android/MainActivity.java
+          grep -Fq 'contentHeightChanged' app/src/main/java/com/xvpn/android/DismissibleBottomSheetScrollView.java
+          grep -Fq 'Crystalline egress locator' app/src/main/java/com/xvpn/android/ExitIpIconView.java
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- app/src/main/java/com/xvpn/android/MainActivity.java \
+                     app/src/main/java/com/xvpn/android/DismissibleBottomSheetScrollView.java \
+                     app/src/main/java/com/xvpn/android/ExitIpIconView.java \
+                     app/build.gradle VERSION .github/workflows/build-apk.yml
+          git diff --cached --check
+          git commit -m 'fix: adapt node sheet height and refresh exit IP icon'
+          git push origin HEAD:dev/mihomo-core-v1
