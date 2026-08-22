@@ -23,6 +23,32 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v6
 
+      - name: Persist Mihomo core version in existing version row
+        if: ${{ github.event_name == 'push' && github.ref_name == 'dev/mihomo-core-v1' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('app/src/main/java/com/xvpn/android/MainActivity.java')
+          s = p.read_text()
+          old = 'View versionRow=settingRow("版本",BuildConfig.VERSION_NAME + " · 检查更新",()->checkForUpdates(true));'
+          new = 'View versionRow=settingRow("版本",BuildConfig.VERSION_NAME + " · Mihomo " + BuildConfig.MIHOMO_CORE_VERSION + " · 检查更新",()->checkForUpdates(true));'
+          if new in s:
+              raise SystemExit(0)
+          if old not in s:
+              raise SystemExit('Existing version row changed unexpectedly; refusing broad UI rewrite')
+          p.write_text(s.replace(old, new, 1))
+          PY
+          git diff --check -- app/src/main/java/com/xvpn/android/MainActivity.java
+          if ! git diff --quiet -- app/src/main/java/com/xvpn/android/MainActivity.java; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add -- app/src/main/java/com/xvpn/android/MainActivity.java
+            git commit -m 'feat: show Mihomo core version in version row [skip ci]'
+            git push origin HEAD:dev/mihomo-core-v1
+          fi
+
       - name: Set up JDK 17
         uses: actions/setup-java@v5
         with:
@@ -65,6 +91,14 @@ jobs:
           ACTIVE_BRANCH="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
           if [ "$ACTIVE_BRANCH" = 'dev/mihomo-core-v1' ]; then
             grep -Fq "def mihomoWrapperVersion = '0.3.1'" app/build.gradle
+            grep -Fq "def mihomoCoreVersion = '1.19.28'" app/build.gradle
+            grep -Fq "def mihomoRulesCommit = '669d7042b3590f4d1a664469df27fee4ddf188d6'" app/build.gradle
+            grep -Fq "versionName '1.1.1-mihomo3'" app/build.gradle
+            grep -Fq 'BuildConfig.MIHOMO_CORE_VERSION' app/src/main/java/com/xvpn/android/MainActivity.java
+            grep -Fq 'android:name=".MihomoRuleProvider"' app/src/main/AndroidManifest.xml
+            grep -Fq 'BuildConfig.MIHOMO_GEOSITE_CN_SHA256' app/src/main/java/com/xvpn/android/MihomoRuleProvider.java
+            grep -Fq 'BuildConfig.MIHOMO_GEOIP_CN_SHA256' app/src/main/java/com/xvpn/android/MihomoRuleProvider.java
+            grep -Fq 'RULE-SET,' app/src/main/java/com/xvpn/android/MihomoProfileBuilder.java
             grep -Fq 'import io.github.oviron.libmihomo.Clash;' app/src/main/java/com/xvpn/android/VpnCoreService.java
             ! grep -Fq 'io.nekohasekai.libbox' app/src/main/java/com/xvpn/android/VpnCoreService.java
           fi
@@ -100,7 +134,7 @@ jobs:
           set -o pipefail
           gradle --no-daemon clean :app:testReleaseUnitTest :app:lintRelease :app:assembleRelease 2>&1 | tee build.log
 
-      - name: Verify APK signature, package and native core
+      - name: Verify APK signature, package, rules and native core
         id: verify
         shell: bash
         run: |
@@ -123,11 +157,21 @@ jobs:
           printf '%s\n' "$BADGING" | grep -F "sdkVersion:'26'"
           printf '%s\n' "$BADGING" | grep -F "targetSdkVersion:'36'"
           printf '%s\n' "$BADGING" | grep -F "native-code: 'arm64-v8a'"
-          "$AAPT" dump xmltree "$APK" AndroidManifest.xml | grep -F 'android.net.VpnService.SUPPORTS_ALWAYS_ON'
+          MANIFEST_TREE="$("$AAPT" dump xmltree "$APK" AndroidManifest.xml)"
+          printf '%s\n' "$MANIFEST_TREE" | grep -F 'android.net.VpnService.SUPPORTS_ALWAYS_ON'
           ACTIVE_BRANCH="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
           if [ "$ACTIVE_BRANCH" = 'dev/mihomo-core-v1' ]; then
+            printf '%s\n' "$MANIFEST_TREE" | grep -F 'com.xvpn.android.MihomoRuleProvider'
             unzip -Z1 "$APK" | grep -Fx 'lib/arm64-v8a/libclash.so'
             unzip -Z1 "$APK" | grep -Fx 'lib/arm64-v8a/libmihomo-jni.so'
+            unzip -Z1 "$APK" | grep -Fx 'assets/mihomo-rules/geosite-cn.mrs'
+            unzip -Z1 "$APK" | grep -Fx 'assets/mihomo-rules/geoip-cn.mrs'
+            test "$(unzip -p "$APK" assets/mihomo-rules/geosite-cn.mrs | sha256sum | awk '{print $1}')" = 'a7368abc76702b0a7886d00054815df2fc0a1662239c916f1c4239c25e1af085'
+            test "$(unzip -p "$APK" assets/mihomo-rules/geoip-cn.mrs | sha256sum | awk '{print $1}')" = 'a7db74faad22913bd2d193be4c33d46dddc2e0948ebff9f0fff044bb6416a734'
+            if unzip -Z1 "$APK" | grep -E '^assets/rules/.*\.srs$'; then
+              echo 'Unexpected obsolete sing-box SRS rule in Mihomo APK'
+              exit 1
+            fi
             if unzip -Z1 "$APK" | grep -F 'libbox.so'; then
               echo 'Unexpected sing-box libbox.so in Mihomo APK'
               exit 1
@@ -172,14 +216,14 @@ jobs:
           {
             echo "run_id=${GITHUB_RUN_ID}"
             echo "run_url=https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-            echo "source_commit=${GITHUB_SHA}"
+            echo "source_commit=$(git rev-parse HEAD)"
             echo "build=${BUILD_OUTCOME:-not-run}"
             echo "verify=${VERIFY_OUTCOME:-not-run}"
             echo "prepare=${PREPARE_OUTCOME:-not-run}"
             echo "upload=${UPLOAD_OUTCOME:-not-run}"
             echo "updated_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo "--- build-log-tail ---"
-            tail -n 140 build.log 2>/dev/null || true
+            tail -n 160 build.log 2>/dev/null || true
           } > ci/mihomo-last-status.txt
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
