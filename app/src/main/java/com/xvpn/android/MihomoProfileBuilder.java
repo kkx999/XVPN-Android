@@ -37,7 +37,11 @@ final class MihomoProfileBuilder {
                         .put("proxies", new JSONArray().put(PROXY_NAME))))
                 .put("dns", buildDns())
                 .put("rules", buildRules(RouteMode.GLOBAL.label.equals(routeLabel)));
-        return profile.toString(2);
+
+        // Do not save JSONObject.toString() as config.yaml. JSON is only a
+        // subset of YAML until JSON-only escaping (for example \/) appears.
+        // SafeYaml emits YAML-defined escapes and preserves literal backslashes.
+        return SafeYaml.dump(profile);
     }
 
     private static JSONObject findProxyOutbound(JSONObject source) throws Exception {
@@ -120,7 +124,7 @@ final class MihomoProfileBuilder {
                 applyTls(src, out, false, true);
                 break;
             default:
-                throw new IllegalArgumentException("Mihomo 第一版暂不支持该协议：" + type);
+                throw new IllegalArgumentException("Mihomo 测试版暂不支持该协议：" + type);
         }
         return out;
     }
@@ -229,12 +233,7 @@ final class MihomoProfileBuilder {
                 .put("IP-CIDR6,::1/128,DIRECT,no-resolve")
                 .put("IP-CIDR6,fc00::/7,DIRECT,no-resolve")
                 .put("IP-CIDR6,fe80::/10,DIRECT,no-resolve");
-        if (!global) {
-            // First Mihomo migration build deliberately uses only deterministic,
-            // local rules. A pinned MRS CN ruleset is added after real-device
-            // validation so startup never depends on an unverified rule download.
-            rules.put("DOMAIN-SUFFIX,cn,DIRECT");
-        }
+        if (!global) rules.put("DOMAIN-SUFFIX,cn,DIRECT");
         rules.put("MATCH," + GROUP_NAME);
         return rules;
     }
