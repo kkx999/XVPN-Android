@@ -9,8 +9,26 @@ def releaseKeyPassword = System.getenv('XVPN_KEY_PASSWORD')
 def isReleaseBuild = gradle.startParameter.taskNames.any { it.toLowerCase().contains('release') }
 
 def mihomoWrapperVersion = '0.3.1'
+def mihomoCoreVersion = '1.19.28'
 def mihomoAar = file("libs/libmihomo-android-v${mihomoWrapperVersion}.aar")
 def mihomoSha = file("libs/libmihomo-android-v${mihomoWrapperVersion}.aar.sha256")
+
+def mihomoRulesCommit = '669d7042b3590f4d1a664469df27fee4ddf188d6'
+def geositeCnSha256 = 'a7368abc76702b0a7886d00054815df2fc0a1662239c916f1c4239c25e1af085'
+def geoipCnSha256 = 'a7db74faad22913bd2d193be4c33d46dddc2e0948ebff9f0fff044bb6416a734'
+def generatedMihomoRulesDir = layout.buildDirectory.dir('generated/mihomoRules').get().asFile
+def geositeCnMrs = new File(generatedMihomoRulesDir, 'mihomo-rules/geosite-cn.mrs')
+def geoipCnMrs = new File(generatedMihomoRulesDir, 'mihomo-rules/geoip-cn.mrs')
+
+def sha256File = { File target ->
+    def digest = java.security.MessageDigest.getInstance('SHA-256')
+    target.withInputStream { input ->
+        byte[] buffer = new byte[1024 * 1024]
+        int read
+        while ((read = input.read(buffer)) > 0) digest.update(buffer, 0, read)
+    }
+    digest.digest().collect { String.format('%02x', it & 0xff) }.join()
+}
 
 def downloadMihomo = tasks.register('downloadMihomo') {
     inputs.property('mihomoWrapperVersion', mihomoWrapperVersion)
@@ -18,25 +36,61 @@ def downloadMihomo = tasks.register('downloadMihomo') {
     doLast {
         mihomoAar.parentFile.mkdirs()
         def base = "https://github.com/oviron/libmihomo-android/releases/download/v${mihomoWrapperVersion}"
-        new URL("${base}/libmihomo-android-v${mihomoWrapperVersion}.aar").withInputStream { input ->
+        new URI("${base}/libmihomo-android-v${mihomoWrapperVersion}.aar").toURL().withInputStream { input ->
             mihomoAar.withOutputStream { output -> output << input }
         }
-        new URL("${base}/libmihomo-android-v${mihomoWrapperVersion}.aar.sha256").withInputStream { input ->
+        new URI("${base}/libmihomo-android-v${mihomoWrapperVersion}.aar.sha256").toURL().withInputStream { input ->
             mihomoSha.withOutputStream { output -> output << input }
         }
         def expected = mihomoSha.text.trim().split(/\s+/)[0].toLowerCase(Locale.ROOT)
-        def digest = java.security.MessageDigest.getInstance('SHA-256')
-        mihomoAar.withInputStream { input ->
-            byte[] buffer = new byte[1024 * 1024]
-            int read
-            while ((read = input.read(buffer)) > 0) digest.update(buffer, 0, read)
-        }
-        def actual = digest.digest().collect { String.format('%02x', it & 0xff) }.join()
+        def actual = sha256File(mihomoAar)
         if (!expected.matches('[0-9a-f]{64}') || actual != expected) {
             mihomoAar.delete()
             throw new GradleException("Mihomo AAR SHA-256 verification failed: expected ${expected}, got ${actual}")
         }
         logger.lifecycle("Verified libmihomo-android v${mihomoWrapperVersion}: ${actual}")
+    }
+}
+
+def downloadMihomoRules = tasks.register('downloadMihomoRules') {
+    inputs.property('mihomoRulesCommit', mihomoRulesCommit)
+    inputs.property('geositeCnSha256', geositeCnSha256)
+    inputs.property('geoipCnSha256', geoipCnSha256)
+    outputs.files(geositeCnMrs, geoipCnMrs)
+    doLast {
+        def rules = [
+                [name: 'CN geosite', path: 'geo/geosite/cn.mrs', target: geositeCnMrs, expected: geositeCnSha256],
+                [name: 'CN geoip', path: 'geo/geoip/cn.mrs', target: geoipCnMrs, expected: geoipCnSha256]
+        ]
+        rules.each { rule ->
+            File target = rule.target as File
+            String expected = rule.expected as String
+            target.parentFile.mkdirs()
+            if (target.isFile() && sha256File(target) == expected) {
+                logger.lifecycle("Verified cached Mihomo ${rule.name}: ${expected}")
+                return
+            }
+            File temp = new File(target.parentFile, target.name + '.tmp')
+            temp.delete()
+            String url = "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/${mihomoRulesCommit}/${rule.path}"
+            new URI(url).toURL().withInputStream { input ->
+                temp.withOutputStream { output -> output << input }
+            }
+            String actual = sha256File(temp)
+            if (actual != expected) {
+                temp.delete()
+                throw new GradleException("Mihomo ${rule.name} SHA-256 verification failed: expected ${expected}, got ${actual}")
+            }
+            if (target.exists() && !target.delete()) {
+                temp.delete()
+                throw new GradleException("Unable to replace generated Mihomo rule: ${target}")
+            }
+            if (!temp.renameTo(target)) {
+                target.bytes = temp.bytes
+                temp.delete()
+            }
+            logger.lifecycle("Verified Mihomo ${rule.name}: ${actual}")
+        }
     }
 }
 
@@ -52,12 +106,22 @@ android {
         applicationId 'com.xvpn.android'
         minSdk 26
         targetSdk 36
-        versionCode 10103
-        versionName '1.1.1-mihomo2'
+        versionCode 10104
+        versionName '1.1.1-mihomo3'
         manifestPlaceholders = [usesCleartextTraffic: 'true']
+        buildConfigField 'String', 'MIHOMO_CORE_VERSION', "\"${mihomoCoreVersion}\""
+        buildConfigField 'String', 'MIHOMO_RULE_SOURCE_COMMIT', "\"${mihomoRulesCommit}\""
+        buildConfigField 'String', 'MIHOMO_GEOSITE_CN_SHA256', "\"${geositeCnSha256}\""
+        buildConfigField 'String', 'MIHOMO_GEOIP_CN_SHA256', "\"${geoipCnSha256}\""
         // XVPN currently publishes arm64-only APKs; the pinned Mihomo AAR also
         // contains armeabi-v7a/x86_64, which AGP strips because of this filter.
         ndk { abiFilters 'arm64-v8a' }
+    }
+
+    sourceSets {
+        main {
+            assets.srcDir generatedMihomoRulesDir
+        }
     }
 
     signingConfigs {
@@ -101,6 +165,10 @@ android {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+}
+
+tasks.matching { it.name == 'preBuild' }.configureEach {
+    dependsOn(downloadMihomoRules)
 }
 
 dependencies {
