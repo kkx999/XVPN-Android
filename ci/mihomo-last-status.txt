@@ -1,11 +1,11 @@
-run_id=32544342169
-run_url=https://github.com/kkx999/XVPN-Android/actions/runs/32544342169
-source_commit=9e9af573b99dfbb22934176c8f945f00ec75e189
+run_id=32569730907
+run_url=https://github.com/kkx999/XVPN-Android/actions/runs/32569730907
+source_commit=21429fdb5be18a593e94e040839f3d9ab27e70c9
 build=success
 verify=success
 prepare=success
 upload=success
-updated_utc=2026-08-22T01:47:02Z
+updated_utc=2026-08-22T11:15:54Z
 --- build-log-tail ---
 
 Welcome to Gradle 8.13!
@@ -24,14 +24,18 @@ Daemon will be stopped at the end of the build
 > Task :app:downloadMihomo
 Verified libmihomo-android v0.3.1: cd3dfb461d2ae46666260b38048b77a272aa58cae33db22a374b57308bab69ef
 
-> Task :app:preBuild UP-TO-DATE
-> Task :app:preReleaseBuild UP-TO-DATE
+> Task :app:downloadMihomoRules
+Verified Mihomo CN geosite: a7368abc76702b0a7886d00054815df2fc0a1662239c916f1c4239c25e1af085
+Verified Mihomo CN geoip: a7db74faad22913bd2d193be4c33d46dddc2e0948ebff9f0fff044bb6416a734
+
+> Task :app:preBuild
+> Task :app:preReleaseBuild
 > Task :app:generateReleaseBuildConfig
 > Task :app:javaPreCompileRelease
 > Task :app:checkReleaseAarMetadata
 > Task :app:processReleaseNavigationResources
-> Task :app:compileReleaseNavigationResources
 > Task :app:generateReleaseResValues
+> Task :app:compileReleaseNavigationResources
 > Task :app:mapReleaseSourceSetPaths
 > Task :app:generateReleaseResources
 > Task :app:packageReleaseResources
@@ -40,7 +44,7 @@ Verified libmihomo-android v0.3.1: cd3dfb461d2ae46666260b38048b77a272aa58cae33db
 > Task :app:parseReleaseLocalResources
 > Task :app:processReleaseMainManifest
 > Task :app:processReleaseManifest
-> Task :app:preReleaseUnitTestBuild UP-TO-DATE
+> Task :app:preReleaseUnitTestBuild
 > Task :app:javaPreCompileReleaseUnitTest
 > Task :app:processReleaseManifestForPackage
 > Task :app:processReleaseJavaRes NO-SOURCE
@@ -55,22 +59,19 @@ Verified libmihomo-android v0.3.1: cd3dfb461d2ae46666260b38048b77a272aa58cae33db
 > Task :app:generateReleaseAssets UP-TO-DATE
 > Task :app:mergeReleaseAssets
 > Task :app:compressReleaseAssets
-> Task :app:extractReleaseVersionControlInfo
 > Task :app:mergeReleaseNativeLibs
+> Task :app:extractReleaseVersionControlInfo
+> Task :app:mergeReleaseResources
 
 > Task :app:stripReleaseDebugSymbols
 Unable to strip the following libraries, packaging them as they are: libclash.so, libmihomo-jni.so. Run with --info option to learn more.
 
-> Task :app:mergeReleaseJavaResource
 > Task :app:extractReleaseNativeSymbolTables
-> Task :app:mergeReleaseResources
-> Task :app:collectReleaseDependencies
 > Task :app:mergeReleaseNativeDebugMetadata NO-SOURCE
-> Task :app:sdkReleaseDependencyData
-> Task :app:validateSigningRelease
-> Task :app:writeReleaseAppMetadata
-> Task :app:writeReleaseSigningConfigVersions
+> Task :app:mergeReleaseJavaResource
+> Task :app:collectReleaseDependencies
 > Task :app:processReleaseResources
+> Task :app:sdkReleaseDependencyData
 > Task :app:desugarReleaseFileDependencies
 
 > Task :app:compileReleaseJavaWithJavac
@@ -89,6 +90,9 @@ Note: Recompile with -Xlint:deprecation for details.
 > Task :app:generateReleaseLintVitalReportModel
 > Task :app:mergeExtDexRelease
 > Task :app:optimizeReleaseResources
+> Task :app:validateSigningRelease
+> Task :app:writeReleaseAppMetadata
+> Task :app:writeReleaseSigningConfigVersions
 > Task :app:mergeDexRelease
 > Task :app:compileReleaseArtProfile
 > Task :app:lintVitalAnalyzeRelease
@@ -103,7 +107,7 @@ Wrote HTML report to file:///home/runner/work/XVPN-Android/XVPN-Android/app/buil
 > Task :app:packageRelease
 > Task :app:createReleaseApkListingFileRedirect
 > Task :app:assembleRelease
-gradle/actions: Writing build results to /home/runner/work/_temp/.gradle-actions/build-results/build-1787363151269.json
+gradle/actions: Writing build results to /home/runner/work/_temp/.gradle-actions/build-results/build-1787397280815.json
 
 [Incubating] Problems report is available at: file:///home/runner/work/XVPN-Android/XVPN-Android/build/reports/problems/problems-report.html
 
@@ -113,5 +117,5 @@ You can use '--warning-mode all' to show the individual deprecation warnings and
 
 For more on this, please refer to https://docs.gradle.org/8.13/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
 
-BUILD SUCCESSFUL in 1m 15s
-60 actionable tasks: 59 executed, 1 up-to-date
+BUILD SUCCESSFUL in 1m 17s
+61 actionable tasks: 60 executed, 1 up-to-date
