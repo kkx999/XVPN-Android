@@ -1166,7 +1166,7 @@ private void setRouteMode(RouteMode mode) {
         if(notificationLabels instanceof LinearLayout&&((LinearLayout)notificationLabels).getChildCount()>1)((LinearLayout)notificationLabels).getChildAt(1).setTag("mine_notification_status");
         settings.addView(notificationRow,matchWrap());
         settings.addView(divider());
-        View versionRow=settingRow("版本",BuildConfig.VERSION_NAME + " · 检查更新",()->checkForUpdates(true));
+        View versionRow=settingRow("版本",BuildConfig.VERSION_NAME + " · Mihomo " + BuildConfig.MIHOMO_CORE_VERSION + " · 检查更新",()->checkForUpdates(true));
         versionRow.setOnLongClickListener(v->{openAdvancedSettings(v);return true;});
         settings.addView(versionRow,matchWrap());
         page.addView(settings,matchWrap());
