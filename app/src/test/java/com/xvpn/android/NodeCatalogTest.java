@@ -55,7 +55,7 @@ public final class NodeCatalogTest {
     }
 
     @Test(expected = IllegalArgumentException.class)
-    public void rejectsLegacyCatalogWithoutSchema() {
+    public void rejectsLegacyCatalogWithoutSchema() throws Exception {
         NodeCatalog.fromBootstrap(new JSONObject()
                 .put("api", "v1")
                 .put("core", "mihomo")
