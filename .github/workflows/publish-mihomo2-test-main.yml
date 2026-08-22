@@ -36,7 +36,6 @@ jobs:
         run: |
           set -euo pipefail
           TAG='v1.1.1-mihomo2-test'
-          SOURCE='371e09b23abf8f4e37810a8b62dde2fa7ffe7318'
           cat > release-notes.md <<'EOF'
           ## ⚠️ 测试版 / Pre-release
 
@@ -62,12 +61,6 @@ jobs:
           此 APK 已通过 GitHub Actions 单元测试、lint、签名、包信息及 Mihomo native core 校验。
           EOF
 
-          if ! gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
-            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
-              -f ref="refs/tags/${TAG}" \
-              -f sha="$SOURCE" >/dev/null
-          fi
-
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/XVPN-v1.1.1-mihomo2.apk dist/SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --clobber
             gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --title 'XVPN v1.1.1-mihomo2 · 测试版' --notes-file release-notes.md --prerelease
@@ -75,7 +68,7 @@ jobs:
             gh release create "$TAG" \
               dist/XVPN-v1.1.1-mihomo2.apk dist/SHA256SUMS.txt \
               --repo "$GITHUB_REPOSITORY" \
-              --verify-tag \
+              --target 'dev/mihomo-core-v1' \
               --title 'XVPN v1.1.1-mihomo2 · 测试版' \
               --notes-file release-notes.md \
               --prerelease
