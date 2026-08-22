@@ -7,6 +7,7 @@ import java.util.Locale;
 
 /** Converts the existing XVPN/sing-box-shaped node profile into a Mihomo profile. */
 final class MihomoProfileBuilder {
+    static final int TUN_MTU = 1400;
     static final String CORE_LABEL = "Mihomo 1.19.28 · Clash Meta";
     static final String PROXY_NAME = "XVPN-PROXY";
     static final String GROUP_NAME = "XVPN";
