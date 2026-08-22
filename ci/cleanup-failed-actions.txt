@@ -1,2 +1,0 @@
-requested_utc=2026-08-22T01:31:00Z
-scope=delete all completed workflow runs with conclusion=failure
