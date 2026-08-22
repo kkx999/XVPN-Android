@@ -1,0 +1,167 @@
+name: Apply Mihomo6 Lifecycle Fix
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ci/mihomo6-trigger.txt
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout migration branch
+        uses: actions/checkout@v6
+        with:
+          ref: dev/mihomo-core-v1
+          fetch-depth: 0
+
+      - name: Harden VPN native lifecycle
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('app/src/main/java/com/xvpn/android/VpnCoreService.java')
+          s = p.read_text()
+
+          old = '''        if (CoreState.read(this).isActive() && tunStarted) return START_STICKY;
+        boolean explicitStart = ACTION_START.equals(action) && intent != null;'''
+          new = '''        // Never accept a second START while this Service is starting, running,
+        // switching or tearing down. In particular, STOPPING may already have
+        // closed the TUN while the Service object is still alive; accepting a
+        // new START in that window can overlap native stopTun()/startTUN().
+        CoreState.Snapshot lifecycle = CoreState.read(this);
+        if (lifecycle.isActive() || stopRequested.get()) return START_STICKY;
+        boolean explicitStart = ACTION_START.equals(action) && intent != null;'''
+          if old not in s:
+              raise SystemExit('start guard anchor not found')
+          s = s.replace(old, new, 1)
+
+          old = '''        stopRequested.set(false);
+        sessionId = UUID.randomUUID().toString();'''
+          new = '''        // stopRequested is one-way for a Service instance. A stopped instance
+        // must be destroyed before Android can create a fresh connection.
+        sessionId = UUID.randomUUID().toString();'''
+          if old not in s:
+              raise SystemExit('stopRequested reset anchor not found')
+          s = s.replace(old, new, 1)
+
+          old = '''            establishAndStartTun();
+            if (stopRequested.get()) { stopCoreInternal(); return; }
+
+            TunnelHealth health = waitForInitialTunnelHealth(healthTarget);'''
+          new = '''            establishAndStartTun();
+            // requestStop() already queues the single teardown task on the same
+            // executor. Do not run teardown inline here and then run it again.
+            if (stopRequested.get()) return;
+
+            TunnelHealth health = waitForInitialTunnelHealth(healthTarget);'''
+          if old not in s:
+              raise SystemExit('inline stop anchor not found')
+          s = s.replace(old, new, 1)
+
+          old = '''        } catch (Throwable error) {
+            logCoreFailure("Mihomo start failed", error);
+            cleanupCoreObjects();
+            failStart(friendlyCoreError(error));
+        }
+    }
+
+    private void reconfigureCore'''
+          new = '''        } catch (Throwable error) {
+            if (stopRequested.get()) {
+                Log.i(TAG, "Mihomo start cancelled by requested stop");
+                return;
+            }
+            logCoreFailure("Mihomo start failed", error);
+            cleanupCoreObjects();
+            failStart(friendlyCoreError(error));
+        }
+    }
+
+    private void reconfigureCore'''
+          if old not in s:
+              raise SystemExit('start catch anchor not found')
+          s = s.replace(old, new, 1)
+
+          old = '''        Clash.INSTANCE.startTUN(
+                tunDescriptor.getFd(), callback, "xvpn0", "mixed",
+                "172.19.0.1/30,fdfe:dcba:9876::1/126",
+                "172.19.0.2,fdfe:dcba:9876::2",
+                MihomoProfileBuilder.TUN_MTU);
+        tunStarted = true;'''
+          new = '''        synchronized (CORE_LOCK) {
+            if (stopRequested.get()) return;
+            Clash.INSTANCE.startTUN(
+                    tunDescriptor.getFd(), callback, "xvpn0", "mixed",
+                    "172.19.0.1/30,fdfe:dcba:9876::1/126",
+                    "172.19.0.2,fdfe:dcba:9876::2",
+                    MihomoProfileBuilder.TUN_MTU);
+            tunStarted = true;
+        }'''
+          if old not in s:
+              raise SystemExit('startTUN anchor not found')
+          s = s.replace(old, new, 1)
+
+          old = '''    private void cleanupCoreObjects() {
+        if (tunStarted && mihomoReady) {
+            try { Clash.INSTANCE.stopTun(); } catch (Throwable ignored) {}
+        }
+        tunStarted = false;
+        ParcelFileDescriptor descriptor = tunDescriptor;
+        tunDescriptor = null;
+        if (descriptor != null) try { descriptor.close(); } catch (Exception ignored) {}
+    }'''
+          new = '''    private void cleanupCoreObjects() {
+        ParcelFileDescriptor descriptor;
+        // Mihomo exposes a process-global native TUN. Serialize native start/stop
+        // across Service teardown/recreation and clear ownership before releasing
+        // the descriptor so cleanup is idempotent even if onDestroy races a stop.
+        synchronized (CORE_LOCK) {
+            if (tunStarted && mihomoReady) {
+                try { Clash.INSTANCE.stopTun(); } catch (Throwable error) {
+                    Log.w(TAG, "Mihomo stopTun failed during teardown", error);
+                }
+            }
+            tunStarted = false;
+            descriptor = tunDescriptor;
+            tunDescriptor = null;
+        }
+        if (descriptor != null) try { descriptor.close(); } catch (Exception ignored) {}
+    }'''
+          if old not in s:
+              raise SystemExit('cleanup anchor not found')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          g = Path('app/build.gradle')
+          t = g.read_text()
+          t = t.replace("versionCode 10106", "versionCode 10107", 1)
+          t = t.replace("versionName '1.1.1-mihomo5'", "versionName '1.1.1-mihomo6'", 1)
+          g.write_text(t)
+
+          Path('VERSION').write_text('1.1.1-mihomo6\n')
+
+          w = Path('.github/workflows/build-apk.yml')
+          x = w.read_text()
+          x = x.replace("versionName '1.1.1-mihomo5'", "versionName '1.1.1-mihomo6'", 1)
+          w.write_text(x)
+          PY
+
+          git diff --check
+          grep -Fq 'if (lifecycle.isActive() || stopRequested.get()) return START_STICKY;' app/src/main/java/com/xvpn/android/VpnCoreService.java
+          grep -Fq 'synchronized (CORE_LOCK)' app/src/main/java/com/xvpn/android/VpnCoreService.java
+          grep -Fq "versionName '1.1.1-mihomo6'" app/build.gradle
+          test "$(tr -d '[:space:]' < VERSION)" = '1.1.1-mihomo6'
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app/src/main/java/com/xvpn/android/VpnCoreService.java app/build.gradle VERSION .github/workflows/build-apk.yml
+          git commit -m 'fix: serialize Mihomo start stop lifecycle'
+          git push origin HEAD:dev/mihomo-core-v1
