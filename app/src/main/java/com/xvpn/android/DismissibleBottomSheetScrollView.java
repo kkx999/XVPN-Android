@@ -1,11 +1,13 @@
 package com.xvpn.android;
 
 import android.content.Context;
+import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.VelocityTracker;
 import android.view.View;
 import android.view.ViewConfiguration;
 import android.view.ViewGroup;
+import android.view.WindowManager;
 import android.widget.ScrollView;
 
 /** Scroll container whose top handle supports a natural pull-down dismissal. */
@@ -23,6 +25,7 @@ final class DismissibleBottomSheetScrollView extends ScrollView {
     private float translation;
     private boolean handleGesture;
     private boolean dragging;
+    private int lastAppliedWindowHeight=-1;
 
     DismissibleBottomSheetScrollView(Context context){
         super(context);
@@ -35,11 +38,17 @@ final class DismissibleBottomSheetScrollView extends ScrollView {
 
     void configure(View target,Runnable dismiss,ProgressListener listener){
         this.target=target;this.dismiss=dismiss;this.listener=listener;
-        // The node picker persists manual country toggles for the current open
-        // sheet, but every new picker should start with only the selected
-        // node's country expanded. Other bottom sheets have no SelectionDotView
-        // descendants and are therefore left untouched.
-        post(this::resetNodePickerExpansionIfPresent);
+        // Collapse non-selected node countries before MainActivity performs the
+        // dialog's first height measurement. Doing this later with post() left
+        // the window at the height of old expanded rows and created a large
+        // empty white area at the bottom of the picker.
+        resetNodePickerExpansionIfPresent();
+        if(target!=null){
+            target.addOnLayoutChangeListener((view,left,top,right,bottom,oldLeft,oldTop,oldRight,oldBottom)->{
+                if(bottom-top!=oldBottom-oldTop) scheduleWindowHeightSync();
+            });
+        }
+        scheduleWindowHeightSync();
     }
 
     @Override public boolean onInterceptTouchEvent(MotionEvent event){
@@ -110,6 +119,7 @@ final class DismissibleBottomSheetScrollView extends ScrollView {
     private void resetNodePickerExpansionIfPresent(){
         if(!(target instanceof ViewGroup))return;
         ViewGroup sheet=(ViewGroup)target;
+        boolean pickerFound=false;
         for(int i=0;i<sheet.getChildCount();i++){
             View candidate=sheet.getChildAt(i);
             if(!(candidate instanceof ViewGroup))continue;
@@ -117,10 +127,49 @@ final class DismissibleBottomSheetScrollView extends ScrollView {
             if(block.getChildCount()<2)continue;
             View body=block.getChildAt(1);
             if(!(body instanceof ViewGroup)||!containsSelectionMarker(body))continue;
+            pickerFound=true;
             boolean selected=containsActiveSelection(body);
             body.setVisibility(selected?View.VISIBLE:View.GONE);
             ChevronView chevron=findChevron(block.getChildAt(0));
             if(chevron!=null)chevron.setExpanded(selected);
+        }
+        if(pickerFound){sheet.requestLayout();requestLayout();}
+    }
+
+    private void scheduleWindowHeightSync(){
+        removeCallbacks(windowHeightSync);
+        post(windowHeightSync);
+    }
+
+    private final Runnable windowHeightSync=this::syncWindowHeight;
+
+    private void syncWindowHeight(){
+        if(target==null||!isAttachedToWindow())return;
+        int screenWidth=getResources().getDisplayMetrics().widthPixels;
+        int maxHeight=(int)(getResources().getDisplayMetrics().heightPixels*.84f);
+        int width=getWidth()>0?getWidth():screenWidth;
+        // Measure the natural content height. The window grows only as countries
+        // are expanded and stops at the existing 84% cap, after which ScrollView
+        // handles the remaining content.
+        target.measure(MeasureSpec.makeMeasureSpec(width,MeasureSpec.EXACTLY),
+                MeasureSpec.makeMeasureSpec(0,MeasureSpec.UNSPECIFIED));
+        int desired=Math.max((int)dp(120),Math.min(target.getMeasuredHeight(),maxHeight));
+        if(desired==lastAppliedWindowHeight)return;
+        View root=getRootView();
+        ViewGroup.LayoutParams raw=root==null?null:root.getLayoutParams();
+        if(!(raw instanceof WindowManager.LayoutParams))return;
+        WindowManager.LayoutParams params=(WindowManager.LayoutParams)raw;
+        if(params.height==desired){lastAppliedWindowHeight=desired;return;}
+        params.width=WindowManager.LayoutParams.MATCH_PARENT;
+        params.height=desired;
+        params.gravity=Gravity.BOTTOM;
+        try{
+            WindowManager manager=(WindowManager)getContext().getSystemService(Context.WINDOW_SERVICE);
+            if(manager!=null){manager.updateViewLayout(root,params);lastAppliedWindowHeight=desired;}
+        }catch(IllegalArgumentException ignored){
+            // The first callback can race Dialog.show(); the next layout pass
+            // will retry once the decor view is attached to WindowManager.
+            postDelayed(windowHeightSync,24L);
         }
     }
 
@@ -155,6 +204,8 @@ final class DismissibleBottomSheetScrollView extends ScrollView {
         if(velocity!=null){velocity.recycle();velocity=null;}
     }
 
-    @Override protected void onDetachedFromWindow(){finishTracker();super.onDetachedFromWindow();}
+    @Override protected void onDetachedFromWindow(){
+        removeCallbacks(windowHeightSync);finishTracker();super.onDetachedFromWindow();
+    }
     private float dp(float value){return value*getResources().getDisplayMetrics().density;}
 }
