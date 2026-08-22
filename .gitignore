@@ -11,3 +11,5 @@ build/
 *.pem
 *.key
 signing-private/
+app/libs/libmihomo-android-*.aar
+app/libs/libmihomo-android-*.aar.sha256
