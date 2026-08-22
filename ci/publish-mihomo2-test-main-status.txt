@@ -1,8 +1,0 @@
-release=v1.1.1-mihomo2-test
-download=success
-publish=success
-verify=success
-source_run=32544173639
-publisher_run=32544628176
-url=https://github.com/kkx999/XVPN-Android/releases/tag/v1.1.1-mihomo2-test
-updated_utc=2026-08-22T01:51:36Z
