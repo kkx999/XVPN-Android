@@ -35,6 +35,17 @@ final class CoreState {
 
     static void publishLifecycle(Context context, int state, int nodeId, String nodeName, String error) {
         Context app = context.getApplicationContext();
+        // VpnCoreService historically published STOPPED immediately before
+        // stopSelf(). A very fast reconnect could therefore start while the old
+        // Service/native TUN was still tearing down. Keep the externally visible
+        // state at STOPPING until onDestroy() sets VpnCoreService.live=false;
+        // onDestroy() then publishes the real STOPPED transition.
+        if (state == STOPPED && VpnCoreService.isLive()) {
+            synchronized (LOCK) {
+                ensureLoaded(app);
+                if (current.isActive()) return;
+            }
+        }
         synchronized (LOCK) {
             ensureLoaded(app);
             long startedAt = (state == RUNNING || state == SWITCHING)
