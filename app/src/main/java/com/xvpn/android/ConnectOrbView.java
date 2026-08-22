@@ -8,6 +8,7 @@ import android.graphics.Paint;
 import android.graphics.RadialGradient;
 import android.graphics.Shader;
 import android.graphics.SweepGradient;
+import android.os.SystemClock;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.animation.DecelerateInterpolator;
@@ -20,6 +21,8 @@ import android.view.animation.OvershootInterpolator;
  * animator scale is disabled.
  */
 final class ConnectOrbView extends View {
+    private static final long CLICK_GUARD_MS = 700L;
+
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.DITHER_FLAG);
     private final boolean dark;
     private boolean pressed;
@@ -28,6 +31,7 @@ final class ConnectOrbView extends View {
     private ValueAnimator loop;
     private ValueAnimator transition;
     private int connectionState = CoreState.STOPPED;
+    private long lastAcceptedClickAt;
     private Shader glowShader;
     private Shader bodyShader;
     private Shader refractionShader;
@@ -86,6 +90,15 @@ final class ConnectOrbView extends View {
             statePulse = 0f;
             invalidate();
         }
+    }
+
+    @Override public boolean performClick() {
+        long now = SystemClock.uptimeMillis();
+        if (connectionState == CoreState.STARTING || connectionState == CoreState.SWITCHING
+                || connectionState == CoreState.STOPPING) return false;
+        if (lastAcceptedClickAt != 0L && now - lastAcceptedClickAt < CLICK_GUARD_MS) return false;
+        lastAcceptedClickAt = now;
+        return super.performClick();
     }
 
     private boolean motionEnabled() {
