@@ -1,11 +1,11 @@
-run_id=32541717027
-run_url=https://github.com/kkx999/XVPN-Android/actions/runs/32541717027
-source_commit=ad2a6b04267cdb90f24be6d4cb105666fe885a7a
+run_id=32544173639
+run_url=https://github.com/kkx999/XVPN-Android/actions/runs/32544173639
+source_commit=371e09b23abf8f4e37810a8b62dde2fa7ffe7318
 build=success
 verify=success
 prepare=success
 upload=success
-updated_utc=2026-08-22T00:54:14Z
+updated_utc=2026-08-22T01:43:31Z
 --- build-log-tail ---
 
 Welcome to Gradle 8.13!
@@ -42,8 +42,8 @@ Verified libmihomo-android v0.3.1: cd3dfb461d2ae46666260b38048b77a272aa58cae33db
 > Task :app:processReleaseManifest
 > Task :app:preReleaseUnitTestBuild UP-TO-DATE
 > Task :app:javaPreCompileReleaseUnitTest
-> Task :app:processReleaseJavaRes NO-SOURCE
 > Task :app:processReleaseManifestForPackage
+> Task :app:processReleaseJavaRes NO-SOURCE
 > Task :app:processReleaseUnitTestJavaRes NO-SOURCE
 > Task :app:extractProguardFiles
 > Task :app:mergeReleaseJniLibFolders
@@ -55,17 +55,17 @@ Verified libmihomo-android v0.3.1: cd3dfb461d2ae46666260b38048b77a272aa58cae33db
 > Task :app:generateReleaseAssets UP-TO-DATE
 > Task :app:mergeReleaseAssets
 > Task :app:compressReleaseAssets
-> Task :app:extractReleaseVersionControlInfo
 > Task :app:mergeReleaseNativeLibs
+> Task :app:extractReleaseVersionControlInfo
+> Task :app:mergeReleaseJavaResource
 
 > Task :app:stripReleaseDebugSymbols
 Unable to strip the following libraries, packaging them as they are: libclash.so, libmihomo-jni.so. Run with --info option to learn more.
 
-> Task :app:mergeReleaseJavaResource
-> Task :app:extractReleaseNativeSymbolTables
 > Task :app:collectReleaseDependencies
-> Task :app:mergeReleaseNativeDebugMetadata NO-SOURCE
+> Task :app:extractReleaseNativeSymbolTables
 > Task :app:sdkReleaseDependencyData
+> Task :app:mergeReleaseNativeDebugMetadata NO-SOURCE
 > Task :app:validateSigningRelease
 > Task :app:writeReleaseAppMetadata
 > Task :app:writeReleaseSigningConfigVersions
@@ -103,7 +103,7 @@ Note: Recompile with -Xlint:deprecation for details.
 Wrote HTML report to file:///home/runner/work/XVPN-Android/XVPN-Android/app/build/reports/lint-results-release.html
 
 > Task :app:lintRelease
-gradle/actions: Writing build results to /home/runner/work/_temp/.gradle-actions/build-results/build-1787359977703.json
+gradle/actions: Writing build results to /home/runner/work/_temp/.gradle-actions/build-results/build-1787362935814.json
 
 [Incubating] Problems report is available at: file:///home/runner/work/XVPN-Android/XVPN-Android/build/reports/problems/problems-report.html
 
@@ -113,5 +113,5 @@ You can use '--warning-mode all' to show the individual deprecation warnings and
 
 For more on this, please refer to https://docs.gradle.org/8.13/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
 
-BUILD SUCCESSFUL in 1m 20s
+BUILD SUCCESSFUL in 1m 18s
 60 actionable tasks: 59 executed, 1 up-to-date
