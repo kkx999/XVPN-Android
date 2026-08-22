@@ -1,3 +1,0 @@
-build_run_id=32573446678
-source_sha=00461f143896656a9997b07281d008cd9d855098
-version=1.1.1-mihomo4
