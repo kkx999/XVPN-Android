@@ -40,7 +40,7 @@ final class MihomoProfileBuilder {
                         .put("name", GROUP_NAME)
                         .put("type", "select")
                         .put("proxies", new JSONArray().put(PROXY_NAME))))
-                .put("dns", buildDns());
+                .put("dns", buildDns(global));
 
         if (!global) profile.put("rule-providers", buildRuleProviders());
         profile.put("rules", buildRules(global));
@@ -234,24 +234,36 @@ final class MihomoProfileBuilder {
         }
     }
 
-    private static JSONObject buildDns() throws Exception {
-        return new JSONObject()
+    private static JSONObject buildDns(boolean global) throws Exception {
+        JSONArray domesticDns = new JSONArray()
+                .put("https://dns.alidns.com/dns-query")
+                .put("https://doh.pub/dns-query");
+        JSONObject dns = new JSONObject()
                 .put("enable", true)
                 .put("ipv6", true)
                 .put("use-hosts", true)
+                .put("use-system-hosts", true)
                 .put("respect-rules", true)
                 .put("enhanced-mode", "fake-ip")
                 .put("fake-ip-range", "198.18.0.1/16")
+                .put("fake-ip-filter-mode", "blacklist")
                 .put("fake-ip-filter", new JSONArray()
-                        .put("*.lan")
-                        .put("*.local")
+                        .put("+.lan")
+                        .put("+.local")
                         .put("localhost")
-                        .put("*.home.arpa"))
+                        .put("+.home.arpa"))
                 .put("default-nameserver", new JSONArray().put("223.5.5.5").put("119.29.29.29"))
                 .put("proxy-server-nameserver", new JSONArray().put("223.5.5.5").put("119.29.29.29"))
+                .put("direct-nameserver", domesticDns)
+                .put("direct-nameserver-follow-policy", true)
                 .put("nameserver", new JSONArray()
                         .put("https://1.1.1.1/dns-query")
                         .put("https://8.8.8.8/dns-query"));
+        if (!global) {
+            dns.put("nameserver-policy", new JSONObject()
+                    .put("rule-set:" + CN_DOMAIN_PROVIDER, domesticDns));
+        }
+        return dns;
     }
 
     private static JSONObject buildRuleProviders() throws Exception {
@@ -276,12 +288,15 @@ final class MihomoProfileBuilder {
                 .put("DOMAIN-SUFFIX,home.arpa,DIRECT")
                 .put("IP-CIDR,127.0.0.0/8,DIRECT,no-resolve")
                 .put("IP-CIDR,10.0.0.0/8,DIRECT,no-resolve")
+                .put("IP-CIDR,100.64.0.0/10,DIRECT,no-resolve")
                 .put("IP-CIDR,172.16.0.0/12,DIRECT,no-resolve")
                 .put("IP-CIDR,192.168.0.0/16,DIRECT,no-resolve")
                 .put("IP-CIDR,169.254.0.0/16,DIRECT,no-resolve")
+                .put("IP-CIDR,224.0.0.0/4,DIRECT,no-resolve")
                 .put("IP-CIDR6,::1/128,DIRECT,no-resolve")
                 .put("IP-CIDR6,fc00::/7,DIRECT,no-resolve")
-                .put("IP-CIDR6,fe80::/10,DIRECT,no-resolve");
+                .put("IP-CIDR6,fe80::/10,DIRECT,no-resolve")
+                .put("IP-CIDR6,ff00::/8,DIRECT,no-resolve");
         if (!global) {
             // Domain classification first preserves fake-IP routing, then the
             // CN CIDR provider catches direct-IP traffic and unresolved hosts.
