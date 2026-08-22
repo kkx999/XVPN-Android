@@ -1,10 +1,10 @@
-# XVPN Android v1.0.0 Mihomo Native Migration
+# XVPN Android v1.0.0 Mihomo Native Architecture
 
-## Goal
-Migrate from legacy core integration to Mihomo Native Edition.
+## Status
+Implemented. The legacy data plane is no longer part of the application build.
 
 ## Architecture
-Panel v1.0.0 API -> xvpn.node.v1 -> Mihomo Config Builder -> Mihomo Core -> VPN Service
+Panel v1.0.0 API -> xvpn.node.v1 -> Mihomo Profile Builder -> Mihomo Core -> Android VPN Service
 
 ## Preserve
 - Current UI
@@ -14,8 +14,8 @@ Panel v1.0.0 API -> xvpn.node.v1 -> Mihomo Config Builder -> Mihomo Core -> VPN 
 - Node drawer design
 - Latency testing UX
 
-## Replace
-- Legacy core adapter
-- Old node model
-- Old configuration builder
-- Connection state handling
+## Removed
+- sing-box/libbox runtime and bindings
+- Legacy raw node/config compatibility
+- Old configuration builder and SRS rules
+- Legacy core service implementation

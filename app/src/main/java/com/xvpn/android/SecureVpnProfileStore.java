@@ -16,19 +16,20 @@ import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.GCMParameterSpec;
 
-/** Encrypted last-known-good profile used only for Android Always-on recovery. */
+/** Encrypted last-known-good Mihomo YAML used only for Android Always-on recovery. */
 final class SecureVpnProfileStore {
-    private static final String STORE = "xvpn_always_on_profile_v1";
-    private static final String KEY_ALIAS = "xvpn_always_on_profile_key_v1";
-    private static final String VALUE = "profile_enc";
-    private static final String IV = "profile_iv";
+    private static final String STORE = "xvpn_mihomo_always_on_v2";
+    private static final String KEY_ALIAS = "xvpn_mihomo_always_on_key_v2";
+    private static final String VALUE = "mihomo_yaml_enc";
+    private static final String IV = "mihomo_yaml_iv";
 
     private SecureVpnProfileStore() {}
 
-    static void save(Context context, String config, int nodeId, String nodeName,
+    static void save(Context context, String yaml, int nodeId, String nodeName,
                      String routeLabel, String healthTarget) throws Exception {
+        clearLegacy(context);
         JSONObject profile = new JSONObject()
-                .put("config", config == null ? "" : config)
+                .put("yaml", yaml == null ? "" : yaml)
                 .put("node_id", nodeId)
                 .put("node_name", nodeName == null ? "" : nodeName)
                 .put("route_label", routeLabel == null ? "" : routeLabel)
@@ -55,10 +56,10 @@ final class SecureVpnProfileStore {
             JSONObject json = new JSONObject(new String(
                     cipher.doFinal(Base64.decode(encrypted, Base64.NO_WRAP)), StandardCharsets.UTF_8));
             Profile profile = new Profile(
-                    json.optString("config", ""), json.optInt("node_id", 0),
+                    json.optString("yaml", ""), json.optInt("node_id", 0),
                     json.optString("node_name", ""), json.optString("route_label", ""),
                     json.optString("health_target", ""));
-            if (profile.config.trim().isEmpty() || profile.nodeId <= 0) throw new IllegalStateException("Invalid profile");
+            if (profile.yaml.trim().isEmpty() || profile.nodeId <= 0) throw new IllegalStateException("Invalid profile");
             return profile;
         } catch (Exception error) {
             clear(context);
@@ -68,6 +69,23 @@ final class SecureVpnProfileStore {
 
     static void clear(Context context) {
         prefs(context).edit().remove(VALUE).remove(IV).commit();
+        clearLegacy(context);
+    }
+
+    private static void clearLegacy(Context context) {
+        context.getApplicationContext()
+                .getSharedPreferences("xvpn_always_on_profile_v1", Context.MODE_PRIVATE)
+                .edit().clear().commit();
+        try {
+            KeyStore store = KeyStore.getInstance("AndroidKeyStore");
+            store.load(null);
+            if (store.containsAlias("xvpn_always_on_profile_key_v1")) {
+                store.deleteEntry("xvpn_always_on_profile_key_v1");
+            }
+        } catch (Exception ignored) {
+            // Legacy material is never read again even if a vendor keystore
+            // temporarily refuses deletion.
+        }
     }
 
     private static SharedPreferences prefs(Context context) {
@@ -89,14 +107,14 @@ final class SecureVpnProfileStore {
     }
 
     static final class Profile {
-        final String config;
+        final String yaml;
         final int nodeId;
         final String nodeName;
         final String routeLabel;
         final String healthTarget;
 
-        Profile(String config, int nodeId, String nodeName, String routeLabel, String healthTarget) {
-            this.config = config;
+        Profile(String yaml, int nodeId, String nodeName, String routeLabel, String healthTarget) {
+            this.yaml = yaml;
             this.nodeId = nodeId;
             this.nodeName = nodeName == null ? "" : nodeName;
             this.routeLabel = routeLabel == null ? "" : routeLabel;

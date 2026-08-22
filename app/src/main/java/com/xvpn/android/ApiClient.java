@@ -10,6 +10,7 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 
+/** HTTPS transport for the rebuilt XVPN Panel /api/v1 contract only. */
 final class ApiClient {
     static final String DEFAULT_PANEL_BASE = "https://xvpn.666101.xyz";
 

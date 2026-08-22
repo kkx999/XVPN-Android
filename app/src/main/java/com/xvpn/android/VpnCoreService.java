@@ -3,81 +3,55 @@ package com.xvpn.android;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
-import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
-import android.content.pm.PackageManager;
 import android.graphics.drawable.Icon;
 import android.net.ConnectivityManager;
-import android.net.IpPrefix;
-import android.net.LinkProperties;
 import android.net.Network;
 import android.net.NetworkCapabilities;
-import android.net.NetworkRequest;
 import android.net.VpnService;
 import android.os.Build;
-import android.os.Handler;
 import android.os.IBinder;
-import android.os.Looper;
 import android.os.ParcelFileDescriptor;
-import android.os.Process;
 import android.os.SystemClock;
-import android.net.TrafficStats;
-import android.system.OsConstants;
-import android.util.Base64;
 import android.util.Log;
 
-import io.nekohasekai.libbox.CommandServer;
-import io.nekohasekai.libbox.CommandServerHandler;
-import io.nekohasekai.libbox.ConnectionOwner;
-import io.nekohasekai.libbox.InterfaceUpdateListener;
-import io.nekohasekai.libbox.Libbox;
-import io.nekohasekai.libbox.LocalDNSTransport;
-import io.nekohasekai.libbox.NetworkInterfaceIterator;
-import io.nekohasekai.libbox.Notification;
-import io.nekohasekai.libbox.OverrideOptions;
-import io.nekohasekai.libbox.PlatformInterface;
-import io.nekohasekai.libbox.RoutePrefix;
-import io.nekohasekai.libbox.RoutePrefixIterator;
-import io.nekohasekai.libbox.SetupOptions;
-import io.nekohasekai.libbox.StringIterator;
-import io.nekohasekai.libbox.SystemProxyStatus;
-import io.nekohasekai.libbox.TunOptions;
-import io.nekohasekai.libbox.WIFIState;
+import io.github.oviron.libmihomo.Clash;
+import io.github.oviron.libmihomo.InvokeInterface;
+import io.github.oviron.libmihomo.TunInterface;
 
 import org.json.JSONObject;
 
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.OutputStreamWriter;
 import java.net.HttpURLConnection;
 import java.net.InetAddress;
-import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.UnknownHostException;
 import java.net.URL;
-import java.security.KeyStore;
-import java.security.cert.Certificate;
-import java.util.ArrayList;
-import java.util.Enumeration;
-import java.util.List;
+import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * Real sing-box 1.13.19 data plane for XVPN Android 1.1.1-rc1.
+ * Mihomo (Clash Meta) data plane for XVPN Android.
  *
- * Connection state is published only after libbox has accepted the config and
- * established Android's TUN file descriptor.  No optimistic/fake connected
- * state is used.
+ * The public/static surface intentionally matches the previous VpnCoreService
+ * so MainActivity, Panel traffic reporting, Always-on restart and UI state do
+ * not need to know which native core is underneath.
  */
-public final class VpnCoreService extends VpnService implements PlatformInterface, CommandServerHandler {
-    private static final String TAG = "XVPN-Core";
+public final class VpnCoreService extends VpnService {
+    private static final String TAG = "XVPN-Mihomo";
     private static final String ACTION_START = "com.xvpn.android.action.START_CORE";
     private static final String ACTION_STOP = "com.xvpn.android.action.STOP_CORE";
     private static final String ACTION_RECONFIGURE = "com.xvpn.android.action.RECONFIGURE_CORE";
@@ -87,12 +61,10 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
     private static final String EXTRA_ROUTE_LABEL = "route_label";
     private static final String EXTRA_HEALTH_TARGET = "health_target";
     private static final String APP_PREFS = "xvpn_preferences_v1";
-    // Keep the established channel identity so upgrades preserve the user's
-    // notification preference instead of creating a duplicate channel.
     private static final String NOTIFICATION_CHANNEL = "xvpn_vpn_service";
     private static final int NOTIFICATION_ID = 51;
-    private static final Object SETUP_LOCK = new Object();
-    private static volatile boolean libboxReady;
+    private static final Object CORE_LOCK = new Object();
+    private static volatile boolean mihomoReady;
     private static volatile boolean live;
     private static volatile VpnCoreService activeInstance;
 
@@ -101,12 +73,10 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
     private final AtomicBoolean stopRequested = new AtomicBoolean(false);
     private final AtomicBoolean switchInProgress = new AtomicBoolean(false);
     private final AtomicBoolean versionBlockNotified = new AtomicBoolean(false);
-    private CommandServer commandServer;
-    private ParcelFileDescriptor tunDescriptor;
+
     private ConnectivityManager connectivity;
-    private ConnectivityManager.NetworkCallback networkCallback;
-    private volatile Network underlyingNetwork;
-    private volatile InterfaceUpdateListener interfaceListener;
+    private ParcelFileDescriptor tunDescriptor;
+    private volatile boolean tunStarted;
     private volatile int nodeId;
     private volatile String nodeName = "";
     private volatile String routeLabel = "智能分流";
@@ -117,47 +87,33 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
 
     private ScheduledExecutorService metricsExecutor;
     private ScheduledExecutorService reportExecutor;
-    private long baselineTx;
-    private long baselineRx;
-    private long previousTx;
-    private long previousRx;
-    private long previousMetricAt;
+    private long coreBaselineUp;
+    private long coreBaselineDown;
     private volatile long uploadTotal;
     private volatile long downloadTotal;
-    private volatile long lastNotificationAt;
     private long recordedUploadTotal;
     private long recordedDownloadTotal;
     private long lastLocalTrafficPersistAt;
+    private volatile long lastNotificationAt;
 
     public static boolean isLive() { return live; }
 
     static InetAddress[] resolveProbeHost(String host) throws Exception {
         VpnCoreService service = activeInstance;
-        if (service == null || !CoreState.read(service).isActive()) {
-            return InetAddress.getAllByName(host);
-        }
+        if (service == null || !CoreState.read(service).isActive()) return InetAddress.getAllByName(host);
         Network physical = service.physicalNetwork();
-        InetAddress[] answers = physical == null
-                ? InetAddress.getAllByName(host) : physical.getAllByName(host);
+        InetAddress[] answers = physical == null ? InetAddress.getAllByName(host) : physical.getAllByName(host);
         for (InetAddress answer : answers) if (answer instanceof java.net.Inet4Address) return answers;
         throw new UnknownHostException("物理网络未返回 IPv4 地址");
     }
 
-    /** Creates the same direct entry-test socket whether the VPN is on or off. */
     static Socket createProbeSocket() throws Exception {
         VpnCoreService service = activeInstance;
         if (service == null || !CoreState.read(service).isActive()) return new Socket();
         Network physical = service.physicalNetwork();
         Socket socket;
-        try {
-            socket = physical == null ? new Socket() : physical.getSocketFactory().createSocket();
-        } catch (Exception networkFactoryFailure) {
-            socket = new Socket();
-        }
-        // The Network socket factory has already pinned this socket to the
-        // physical transport. protect() is an additional loop guard; a few
-        // vendor ROMs return false for an already-bound socket, so do not turn
-        // that harmless quirk into another false "不可达" result.
+        try { socket = physical == null ? new Socket() : physical.getSocketFactory().createSocket(); }
+        catch (Exception ignored) { socket = new Socket(); }
         if (!service.protect(socket) && physical == null) {
             try { socket.close(); } catch (Exception ignored) {}
             throw new IOException("无法让测速连接绕过当前 VPN");
@@ -167,33 +123,23 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
 
     static TunnelHealth checkTunnelHealthNow() {
         VpnCoreService service = activeInstance;
-        if (service == null || CoreState.read(service).state != CoreState.RUNNING) {
-            return TunnelHealth.failure("VPN 尚未连接");
-        }
+        if (service == null || CoreState.read(service).state != CoreState.RUNNING) return TunnelHealth.failure("VPN 尚未连接");
         return service.probeTunnelOnce();
     }
 
-    /** Tests exactly the user-selected latency target through the live TUN. */
     static TunnelHealth checkTunnelHealthNow(String target) {
         VpnCoreService service = activeInstance;
-        if (service == null || CoreState.read(service).state != CoreState.RUNNING) {
-            return TunnelHealth.failure("VPN 尚未连接");
-        }
-        String safeTarget = normalizeHealthTarget(target);
-        if (safeTarget.isEmpty()) return TunnelHealth.failure("测试网址无效");
-        return service.probeTunnelOnce(new String[]{safeTarget});
+        if (service == null || CoreState.read(service).state != CoreState.RUNNING) return TunnelHealth.failure("VPN 尚未连接");
+        String safe = normalizeHealthTarget(target);
+        return safe.isEmpty() ? TunnelHealth.failure("测试网址无效") : service.probeTunnelOnce(new String[]{safe});
     }
 
-    /** Returns the verified health result that brought the current node to RUNNING. */
     static TunnelHealth lastTunnelHealthNow() {
         VpnCoreService service = activeInstance;
-        if (service == null || CoreState.read(service).state != CoreState.RUNNING) {
-            return TunnelHealth.failure("VPN 尚未连接");
-        }
+        if (service == null || CoreState.read(service).state != CoreState.RUNNING) return TunnelHealth.failure("VPN 尚未连接");
         return service.lastTunnelHealth;
     }
 
-    /** Lets connected-state node selection wait until a rollback is fully idle. */
     static boolean isSwitchInProgressNow() {
         VpnCoreService service = activeInstance;
         return service != null && service.switchInProgress.get();
@@ -203,14 +149,13 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
         start(context, config, nodeId, nodeName, routeLabel, "");
     }
 
-    static void start(Context context, String config, int nodeId, String nodeName,
-                      String routeLabel, String healthTarget) {
+    static void start(Context context, String config, int nodeId, String nodeName, String routeLabel, String healthTarget) {
         Intent intent = new Intent(context, VpnCoreService.class)
                 .setAction(ACTION_START)
                 .putExtra(EXTRA_CONFIG, config)
                 .putExtra(EXTRA_NODE_ID, nodeId)
-                .putExtra(EXTRA_NODE_NAME, nodeName == null ? "" : nodeName)
-                .putExtra(EXTRA_ROUTE_LABEL, routeLabel == null ? "" : routeLabel)
+                .putExtra(EXTRA_NODE_NAME, value(nodeName))
+                .putExtra(EXTRA_ROUTE_LABEL, value(routeLabel))
                 .putExtra(EXTRA_HEALTH_TARGET, normalizeHealthTarget(healthTarget));
         context.startForegroundService(intent);
     }
@@ -219,15 +164,13 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
         reconfigure(context, config, nodeId, nodeName, routeLabel, "");
     }
 
-    /** Uses the same saved HTTP/HTTPS health target for every live reconfiguration. */
-    static void reconfigure(Context context, String config, int nodeId, String nodeName,
-                            String routeLabel, String healthTarget) {
+    static void reconfigure(Context context, String config, int nodeId, String nodeName, String routeLabel, String healthTarget) {
         Intent intent = new Intent(context, VpnCoreService.class)
                 .setAction(ACTION_RECONFIGURE)
                 .putExtra(EXTRA_CONFIG, config)
                 .putExtra(EXTRA_NODE_ID, nodeId)
-                .putExtra(EXTRA_NODE_NAME, nodeName == null ? "" : nodeName)
-                .putExtra(EXTRA_ROUTE_LABEL, routeLabel == null ? "" : routeLabel)
+                .putExtra(EXTRA_NODE_NAME, value(nodeName))
+                .putExtra(EXTRA_ROUTE_LABEL, value(routeLabel))
                 .putExtra(EXTRA_HEALTH_TARGET, normalizeHealthTarget(healthTarget));
         context.startService(intent);
     }
@@ -238,11 +181,9 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
             CoreState.publishLifecycle(context, CoreState.STOPPED, state.nodeId, state.nodeName, "");
             return;
         }
-        Intent intent = new Intent(context, VpnCoreService.class).setAction(ACTION_STOP);
-        context.startService(intent);
+        context.startService(new Intent(context, VpnCoreService.class).setAction(ACTION_STOP));
     }
 
-    /** Logout/server changes must prevent an Always-on restart with stale credentials. */
     static void stopAndForget(Context context) {
         SecureVpnProfileStore.clear(context);
         stop(context);
@@ -260,28 +201,26 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
         String action = intent == null ? "" : intent.getAction();
         if (ACTION_STOP.equals(action)) {
             requestStop();
-            return Service.START_NOT_STICKY;
+            return START_NOT_STICKY;
         }
+
         if (ACTION_RECONFIGURE.equals(action) && intent != null) {
+            if (CoreState.read(this).state != CoreState.RUNNING || !tunStarted) return START_NOT_STICKY;
             String config = intent.getStringExtra(EXTRA_CONFIG);
             int nextNodeId = intent.getIntExtra(EXTRA_NODE_ID, 0);
+            if (config == null || config.trim().isEmpty() || nextNodeId <= 0) return START_NOT_STICKY;
+            if (!switchInProgress.compareAndSet(false, true)) return START_NOT_STICKY;
             String nextNodeName = value(intent.getStringExtra(EXTRA_NODE_NAME));
             String nextRouteLabel = value(intent.getStringExtra(EXTRA_ROUTE_LABEL));
             String healthTarget = normalizeHealthTarget(intent.getStringExtra(EXTRA_HEALTH_TARGET));
-            CoreState.Snapshot state = CoreState.read(this);
-            if (commandServer == null || state.state != CoreState.RUNNING) return Service.START_NOT_STICKY;
-            if (config == null || config.trim().isEmpty() || nextNodeId <= 0) return Service.START_NOT_STICKY;
-            if (!switchInProgress.compareAndSet(false, true)) return Service.START_NOT_STICKY;
             CoreState.publishLifecycle(this, CoreState.SWITCHING, nextNodeId, nextNodeName, "");
-            updateForegroundNotification("XVPN 正在切换", "正在应用 "
-                    + (nextRouteLabel.isEmpty() ? routeLabel : nextRouteLabel) + " · "
-                    + (nextNodeName.isEmpty() ? "当前节点" : nextNodeName), false);
+            updateForegroundNotification("XVPN 正在切换", "正在应用 " + (nextNodeName.isEmpty() ? "当前节点" : nextNodeName), false);
             coreExecutor.execute(() -> reconfigureCore(config, nextNodeId, nextNodeName, nextRouteLabel, healthTarget));
-            return Service.START_STICKY;
+            return START_STICKY;
         }
-        if (commandServer != null || CoreState.read(this).isActive()) return Service.START_STICKY;
 
-        final boolean explicitStart = ACTION_START.equals(action) && intent != null;
+        if (CoreState.read(this).isActive() && tunStarted) return START_STICKY;
+        boolean explicitStart = ACTION_START.equals(action) && intent != null;
         String config;
         String healthTarget;
         if (explicitStart) {
@@ -290,17 +229,15 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
             nodeId = intent.getIntExtra(EXTRA_NODE_ID, 0);
             nodeName = value(intent.getStringExtra(EXTRA_NODE_NAME));
             routeLabel = value(intent.getStringExtra(EXTRA_ROUTE_LABEL));
-            // Only a profile that has passed a real tunnel health check is eligible
-            // for future system restarts.
             SecureVpnProfileStore.clear(this);
         } else {
             SecureVpnProfileStore.Profile profile = SecureVpnProfileStore.load(this);
             if (profile == null) {
                 CoreState.publishLifecycle(this, CoreState.STOPPED, 0, "", "");
                 stopSelf(startId);
-                return Service.START_NOT_STICKY;
+                return START_NOT_STICKY;
             }
-            config = profile.config;
+            config = profile.yaml;
             healthTarget = normalizeHealthTarget(profile.healthTarget);
             nodeId = profile.nodeId;
             nodeName = value(profile.nodeName);
@@ -309,22 +246,18 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
         if (routeLabel.isEmpty()) routeLabel = "智能分流";
         if (config == null || config.trim().isEmpty() || nodeId <= 0) {
             failStart("节点配置为空，请刷新节点后重试");
-            return Service.START_NOT_STICKY;
+            return START_NOT_STICKY;
         }
 
         stopRequested.set(false);
         sessionId = UUID.randomUUID().toString();
         CoreState.publishLifecycle(this, CoreState.STARTING, nodeId, nodeName, "");
-        startForeground(NOTIFICATION_ID, serviceNotification(
-                "XVPN 正在连接", displayNodeName() + " · " + routeLabel, true, false));
+        startForeground(NOTIFICATION_ID, serviceNotification("XVPN 正在连接", displayNodeName() + " · " + routeLabel, true, false));
         coreExecutor.execute(() -> startCore(config, healthTarget));
-        return Service.START_STICKY;
+        return START_STICKY;
     }
 
-    @Override public IBinder onBind(Intent intent) {
-        IBinder system = super.onBind(intent);
-        return system;
-    }
+    @Override public IBinder onBind(Intent intent) { return super.onBind(intent); }
 
     @Override public void onRevoke() {
         SecureVpnProfileStore.clear(this);
@@ -335,44 +268,26 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
         live = false;
         if (activeInstance == this) activeInstance = null;
         stopRequested.set(true);
-        closeNetworkMonitor();
         shutdownSchedulers(false);
         cleanupCoreObjects();
         CoreState.Snapshot state = CoreState.read(this);
-        if (state.isActive()) {
-            CoreState.publishLifecycle(this, CoreState.STOPPED,
-                    state.nodeId > 0 ? state.nodeId : nodeId,
-                    state.nodeName.isEmpty() ? nodeName : state.nodeName, "");
-        }
+        if (state.isActive()) CoreState.publishLifecycle(this, CoreState.STOPPED, state.nodeId, state.nodeName, "");
         coreExecutor.shutdownNow();
-        // Let the last immutable traffic snapshot reach the panel.  The task
-        // no longer touches service state, so a graceful drain is safe here.
         reportIo.shutdown();
         super.onDestroy();
     }
 
     private void startCore(String config, String healthTarget) {
         try {
-            ensureLibboxSetup();
-            Libbox.checkConfig(config);
+            enforcePanelUpdatePolicy();
+            ensureMihomoLoaded();
+            applyMihomoProfile(config, routeLabel);
             if (stopRequested.get()) return;
+            establishAndStartTun();
+            if (stopRequested.get()) { stopCoreInternal(); return; }
 
-            commandServer = new CommandServer(this, this);
-            commandServer.start();
-            OverrideOptions overrides = new OverrideOptions();
-            overrides.setAutoRedirect(false);
-            commandServer.startOrReloadService(config, overrides);
-            if (stopRequested.get()) {
-                stopCoreInternal();
-                return;
-            }
-
-            // First connect stays truthful, but should not wait through a
-            // duplicate full verification cycle before the UI can continue.
             TunnelHealth health = waitForInitialTunnelHealth(healthTarget);
-            if (!health.healthy) {
-                throw new IllegalStateException("隧道已建立，但联网检测失败：" + health.error);
-            }
+            if (!health.healthy) throw new IllegalStateException("隧道已建立，但联网检测失败：" + health.error);
 
             lastTunnelHealth = health;
             activeConfig = config;
@@ -382,57 +297,63 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
             updateForegroundNotification("XVPN 已连接", connectedNotificationText(0L, 0L), true);
             startMetricsAndReporting();
         } catch (Throwable error) {
-            logCoreFailure("Core start failed", error);
+            logCoreFailure("Mihomo start failed", error);
             cleanupCoreObjects();
             failStart(friendlyCoreError(error));
         }
     }
 
-    private void reconfigureCore(String config, int nextNodeId, String nextNodeName, String nextRouteLabel,
-                                 String healthTarget) {
-        final int previousNodeId = nodeId;
-        final String previousNodeName = nodeName;
-        final String previousRouteLabel = routeLabel;
-        final String previousConfig = activeConfig;
-        final String previousHealthTarget = activeHealthTarget;
-        boolean schedulersStopped = false;
-        boolean reloadAttempted = false;
+    /**
+     * Always-on can start without opening MainActivity, so the service checks
+     * the same Panel policy before loading native code. Network/source outages
+     * are retried later and do not strand an otherwise valid Always-on tunnel.
+     */
+    private void enforcePanelUpdatePolicy() {
         try {
-            ensureLibboxSetup();
-            // Validate before touching the live tunnel. Invalid Panel data can
-            // therefore never tear down an otherwise healthy connection.
-            Libbox.checkConfig(config);
+            SharedPreferences prefs = getSharedPreferences(APP_PREFS, MODE_PRIVATE);
+            String panel = ApiClient.normalizePanelBase(prefs.getString("base_url", ""));
+            if (panel.isEmpty()) return;
+            String query = "/app/update?version_name=" + BuildConfig.VERSION_NAME
+                    + "&version_code=" + BuildConfig.VERSION_CODE;
+            JSONObject result = ApiClient.request(panel, query, "GET", null, null);
+            if (result.optBoolean("must_update", false)
+                    || result.optBoolean("force_update", false)
+                    || result.optBoolean("mustUpdate", false)
+                    || result.optBoolean("forceUpdate", false)) {
+                SecureVpnProfileStore.clear(this);
+                CoreState.notifyVersionBlocked(this);
+                throw new MinimumVersionException();
+            }
+        } catch (MinimumVersionException blocked) {
+            throw blocked;
+        } catch (Exception unavailable) {
+            Log.w(TAG, "Panel update policy check deferred");
+        }
+    }
+
+    private void reconfigureCore(String config, int nextNodeId, String nextNodeName, String nextRouteLabel, String healthTarget) {
+        int previousNodeId = nodeId;
+        String previousNodeName = nodeName;
+        String previousRouteLabel = routeLabel;
+        String previousConfig = activeConfig;
+        String previousHealthTarget = activeHealthTarget;
+        boolean schedulersStopped = false;
+        try {
             updateMetricsSnapshot();
             ReportSnapshot previous = currentReportSnapshot();
             shutdownSchedulers(false);
             schedulersStopped = true;
             if (previous != null) reportIo.execute(() -> reportTrafficSafe(previous));
-            if (stopRequested.get()) {
-                stopCoreInternal();
-                return;
-            }
 
+            String effectiveLabel = value(nextRouteLabel).isEmpty() ? routeLabel : value(nextRouteLabel);
+            applyMihomoProfile(config, effectiveLabel);
             nodeId = nextNodeId;
             nodeName = value(nextNodeName);
-            if (!value(nextRouteLabel).isEmpty()) routeLabel = value(nextRouteLabel);
+            routeLabel = effectiveLabel;
             sessionId = UUID.randomUUID().toString();
-            CommandServer server = commandServer;
-            if (server == null) throw new IllegalStateException("VPN 内核已停止");
-            OverrideOptions overrides = new OverrideOptions();
-            overrides.setAutoRedirect(false);
-            reloadAttempted = true;
-            server.startOrReloadService(config, overrides);
-            if (stopRequested.get()) {
-                stopCoreInternal();
-                return;
-            }
 
-            TunnelHealth health = healthTarget.isEmpty()
-                    ? waitForTunnelHealth()
-                    : waitForTunnelHealth(healthTarget);
-            if (!health.healthy) {
-                throw new IllegalStateException((healthTarget.isEmpty() ? "新配置联网检测失败：" : "测试网址不可访问：") + health.error);
-            }
+            TunnelHealth health = healthTarget.isEmpty() ? waitForTunnelHealth() : waitForTunnelHealth(healthTarget);
+            if (!health.healthy) throw new IllegalStateException("新配置联网检测失败：" + health.error);
 
             lastTunnelHealth = health;
             activeConfig = config;
@@ -442,39 +363,28 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
             updateForegroundNotification("XVPN 已连接", connectedNotificationText(0L, 0L), true);
             startMetricsAndReporting();
         } catch (Throwable error) {
-            logCoreFailure("Core reconfigure failed", error);
+            logCoreFailure("Mihomo reconfigure failed", error);
             String message = friendlyCoreError(error);
-            CommandServer server = commandServer;
-            if (!stopRequested.get() && server != null && (!reloadAttempted || !previousConfig.isEmpty())) {
+            if (!stopRequested.get() && !previousConfig.isEmpty()) {
                 try {
-                    if (reloadAttempted) {
-                        OverrideOptions rollback = new OverrideOptions();
-                        rollback.setAutoRedirect(false);
-                        server.startOrReloadService(previousConfig, rollback);
-                        TunnelHealth restored = healthTarget.isEmpty()
-                                ? waitForTunnelHealth() : waitForTunnelHealth(healthTarget);
-                        if (!restored.healthy) {
-                            throw new IllegalStateException("原连接恢复后仍无法联网：" + restored.error);
-                        }
-                        lastTunnelHealth = restored;
-                    }
+                    applyMihomoProfile(previousConfig, previousRouteLabel);
+                    TunnelHealth restored = previousHealthTarget.isEmpty() ? waitForTunnelHealth() : waitForTunnelHealth(previousHealthTarget);
+                    if (!restored.healthy) throw new IllegalStateException("原连接恢复后仍无法联网：" + restored.error);
+                    lastTunnelHealth = restored;
                     nodeId = previousNodeId;
                     nodeName = previousNodeName;
                     routeLabel = previousRouteLabel;
                     activeConfig = previousConfig;
                     activeHealthTarget = previousHealthTarget;
+                    sessionId = UUID.randomUUID().toString();
                     persistActiveProfile();
-                    if (schedulersStopped) {
-                        sessionId = UUID.randomUUID().toString();
-                        startMetricsAndReporting();
-                    }
                     CoreState.publishLifecycle(this, CoreState.RUNNING, nodeId, nodeName, "");
                     updateForegroundNotification("XVPN 已连接", connectedNotificationText(0L, 0L), true);
-                    CoreState.notifySwitchFailed(this, "切换失败，已保留原连接 · " + message,
-                            previousNodeId, previousRouteLabel);
+                    if (schedulersStopped) startMetricsAndReporting();
+                    CoreState.notifySwitchFailed(this, "切换失败，已保留原连接 · " + message, previousNodeId, previousRouteLabel);
                     return;
                 } catch (Throwable rollbackError) {
-                    logCoreFailure("Core rollback failed", rollbackError);
+                    logCoreFailure("Mihomo rollback failed", rollbackError);
                 }
             }
             cleanupCoreObjects();
@@ -484,34 +394,77 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
         }
     }
 
-    private void ensureLibboxSetup() {
-        synchronized (SETUP_LOCK) {
-            if (libboxReady) return;
-            File base = getFilesDir();
-            File working = getExternalFilesDir(null);
-            if (working == null) working = new File(base, "core-work");
-            File temp = new File(getCacheDir(), "libbox");
-            base.mkdirs();
-            working.mkdirs();
-            temp.mkdirs();
-
-            SetupOptions options = new SetupOptions();
-            options.setBasePath(base.getAbsolutePath());
-            options.setWorkingPath(working.getAbsolutePath());
-            options.setTempPath(temp.getAbsolutePath());
-            options.setFixAndroidStack(BuildConfig.DEBUG || Build.VERSION.SDK_INT >= 28);
-            options.setLogMaxLines(1200L);
-            options.setDebug(BuildConfig.DEBUG);
-            Libbox.setup(options);
-            libboxReady = true;
-            Log.i(TAG, "libbox ready: " + Libbox.version());
+    private void ensureMihomoLoaded() {
+        synchronized (CORE_LOCK) {
+            if (mihomoReady) return;
+            Clash.INSTANCE.load(getApplicationInfo().nativeLibraryDir);
+            Clash.INSTANCE.assertReady();
+            int abi = Clash.INSTANCE.bridgeABI();
+            if (abi != Clash.EXPECTED_BRIDGE_ABI) throw new IllegalStateException("Mihomo bridge ABI 不匹配：" + abi);
+            mihomoReady = true;
+            Log.i(TAG, "Mihomo bridge ready, ABI=" + abi);
         }
     }
 
+    private void applyMihomoProfile(String profile, String ignoredLabel) throws Exception {
+        if (profile == null || profile.trim().isEmpty()) {
+            throw new IllegalArgumentException("Mihomo 配置为空");
+        }
+        File home = new File(getFilesDir(), "mihomo");
+        if (!home.exists() && !home.mkdirs()) throw new IOException("无法创建 Mihomo 配置目录");
+        File config = new File(home, "config.yaml");
+        try (OutputStreamWriter writer = new OutputStreamWriter(new FileOutputStream(config, false), StandardCharsets.UTF_8)) {
+            writer.write(profile);
+            writer.flush();
+        }
+
+        JSONObject init = new JSONObject().put("home-dir", home.getAbsolutePath()).put("version", Build.VERSION.SDK_INT);
+        JSONObject setup = new JSONObject().put("selected-map", new JSONObject());
+        CountDownLatch latch = new CountDownLatch(1);
+        AtomicReference<String> result = new AtomicReference<>(null);
+        Clash.INSTANCE.quickSetup(init.toString(), setup.toString(), new InvokeInterface() {
+            @Override public void onResult(String value) {
+                result.set(value == null ? "" : value);
+                latch.countDown();
+            }
+        });
+        if (!latch.await(12L, TimeUnit.SECONDS)) throw new IOException("Mihomo 配置加载超时");
+        String message = value(result.get());
+        if (!message.isEmpty()) throw new IllegalArgumentException("Mihomo 配置错误：" + message);
+    }
+
+    private void establishAndStartTun() throws Exception {
+        Builder builder = new Builder()
+                .setSession("XVPN")
+                .setMtu(MihomoProfileBuilder.TUN_MTU)
+                .addAddress("172.19.0.1", 30)
+                .addAddress("fdfe:dcba:9876::1", 126)
+                .addRoute("0.0.0.0", 0)
+                .addRoute("::", 0)
+                .addDnsServer("172.19.0.2")
+                .addDnsServer("fdfe:dcba:9876::2")
+                .setBlocking(true);
+        Network physical = physicalNetwork();
+        if (physical != null) builder.setUnderlyingNetworks(new Network[]{physical});
+        tunDescriptor = builder.establish();
+        if (tunDescriptor == null) throw new IOException("系统未能建立 VPN TUN");
+        if (physical != null) setUnderlyingNetworks(new Network[]{physical});
+
+        TunInterface callback = new TunInterface() {
+            @Override public void protect(int fd) { VpnCoreService.this.protect(fd); }
+            @Override public String resolverProcess(int protocol, String source, String target, int uid) { return ""; }
+        };
+        Clash.INSTANCE.startTUN(
+                tunDescriptor.getFd(), callback, "xvpn0", "mixed",
+                "172.19.0.1/30,fdfe:dcba:9876::1/126",
+                "172.19.0.2,fdfe:dcba:9876::2",
+                MihomoProfileBuilder.TUN_MTU);
+        tunStarted = true;
+    }
+
     private void persistActiveProfile() {
-        try {
-            SecureVpnProfileStore.save(this, activeConfig, nodeId, nodeName, routeLabel, activeHealthTarget);
-        } catch (Exception error) {
+        try { SecureVpnProfileStore.save(this, activeConfig, nodeId, nodeName, routeLabel, activeHealthTarget); }
+        catch (Exception error) {
             Log.e(TAG, "Unable to persist encrypted Always-on profile", error);
             SecureVpnProfileStore.clear(this);
         }
@@ -531,26 +484,19 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
         updateMetricsSnapshot();
         shutdownSchedulers(true);
         cleanupCoreObjects();
-        closeNetworkMonitor();
         CoreState.publishLifecycle(this, CoreState.STOPPED, nodeId, nodeName, "");
         stopForeground(STOP_FOREGROUND_REMOVE);
         stopSelf();
     }
 
     private void cleanupCoreObjects() {
-        CommandServer server = commandServer;
-        commandServer = null;
-        if (server != null) {
-            try { server.closeService(); } catch (Throwable ignored) {}
+        if (tunStarted && mihomoReady) {
+            try { Clash.INSTANCE.stopTun(); } catch (Throwable ignored) {}
         }
+        tunStarted = false;
         ParcelFileDescriptor descriptor = tunDescriptor;
         tunDescriptor = null;
-        if (descriptor != null) {
-            try { descriptor.close(); } catch (Exception ignored) {}
-        }
-        if (server != null) {
-            try { server.close(); } catch (Throwable ignored) {}
-        }
+        if (descriptor != null) try { descriptor.close(); } catch (Exception ignored) {}
     }
 
     private void failStart(String message) {
@@ -559,28 +505,12 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
         stopSelf();
     }
 
-    /**
-     * End-to-end data-plane check. These Java connections are deliberately not
-     * protected, so Android sends them into XVPN's TUN and they exercise DNS,
-     * routing, the selected protocol and the remote egress together.
-     */
     private TunnelHealth waitForInitialTunnelHealth(String healthTarget) {
-        // A fresh TUN and its DNS dispatcher can need a short warm-up on some
-        // Android carrier networks. The second attempt runs only after a real
-        // first failure, so the normal successful connection path stays fast.
-        return healthTarget.isEmpty()
-                ? waitForTunnelHealth(defaultHealthTargets(), 2)
-                : waitForTunnelHealth(healthTarget);
+        return healthTarget.isEmpty() ? waitForTunnelHealth(defaultHealthTargets(), 3) : waitForTunnelHealth(new String[]{healthTarget}, 3);
     }
 
-    private TunnelHealth waitForTunnelHealth() {
-        return waitForTunnelHealth(defaultHealthTargets(), 2);
-    }
-
-    /** Exact user-selected target for connection and reconfiguration validation. */
-    private TunnelHealth waitForTunnelHealth(String target) {
-        return waitForTunnelHealth(new String[]{target}, 2);
-    }
+    private TunnelHealth waitForTunnelHealth() { return waitForTunnelHealth(defaultHealthTargets(), 2); }
+    private TunnelHealth waitForTunnelHealth(String target) { return waitForTunnelHealth(new String[]{target}, 2); }
 
     private TunnelHealth waitForTunnelHealth(String[] targets, int attempts) {
         TunnelHealth last = TunnelHealth.failure("网络暂无响应");
@@ -588,25 +518,17 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
             last = probeTunnelOnce(targets);
             if (last.healthy) return last;
             if (attempt + 1 < attempts) {
-                try { Thread.sleep(450L); }
-                catch (InterruptedException interrupted) {
-                    Thread.currentThread().interrupt();
-                    return TunnelHealth.failure("联网检测已取消");
-                }
+                try { Thread.sleep(600L); }
+                catch (InterruptedException error) { Thread.currentThread().interrupt(); return TunnelHealth.failure("联网检测已取消"); }
             }
         }
         return last;
     }
 
-    private TunnelHealth probeTunnelOnce() {
-        return probeTunnelOnce(defaultHealthTargets());
-    }
+    private TunnelHealth probeTunnelOnce() { return probeTunnelOnce(defaultHealthTargets()); }
 
     private String[] defaultHealthTargets() {
-        return new String[]{
-                "http://www.apple.com/library/test/success.html",
-                "https://github.com/favicon.ico"
-        };
+        return new String[]{"http://www.apple.com/library/test/success.html", "https://github.com/favicon.ico"};
     }
 
     private TunnelHealth probeTunnelOnce(String[] targets) {
@@ -616,14 +538,13 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
             long started = System.nanoTime();
             try {
                 connection = (HttpURLConnection) new URL(target).openConnection();
-                connection.setConnectTimeout(2800);
-                connection.setReadTimeout(2800);
+                connection.setConnectTimeout(3500);
+                connection.setReadTimeout(3500);
                 connection.setInstanceFollowRedirects(false);
                 connection.setUseCaches(false);
                 connection.setRequestMethod("GET");
                 connection.setRequestProperty("Connection", "close");
                 connection.setRequestProperty("User-Agent", "XVPN-Android/" + BuildConfig.VERSION_NAME);
-                connection.setRequestProperty("X-XVPN-Health", "1");
                 int status = connection.getResponseCode();
                 if (status >= 200 && status < 400) {
                     long latency = Math.max(1L, (System.nanoTime() - started) / 1_000_000L);
@@ -637,342 +558,53 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
                 else if (name.contains("SSL")) lastError = "代理出口 TLS 握手失败";
                 else if (name.contains("Connect")) lastError = "代理出口连接失败";
                 else lastError = value(error.getMessage()).isEmpty() ? "联网检测失败" : value(error.getMessage());
-            } finally {
-                if (connection != null) connection.disconnect();
-            }
+            } finally { if (connection != null) connection.disconnect(); }
         }
         return TunnelHealth.failure(lastError);
     }
 
-    // ----- Android TUN / libbox platform bridge -----
-
-    @Override public boolean usePlatformAutoDetectInterfaceControl() { return true; }
-
-    @Override public void autoDetectInterfaceControl(int fd) {
-        if (!protect(fd)) Log.w(TAG, "Unable to protect core socket " + fd);
-    }
-
-    @Override public int openTun(TunOptions options) {
-        if (VpnService.prepare(this) != null) throw new IllegalStateException("缺少 VPN 授权");
-
-        Builder builder = new Builder().setSession("XVPN · " + displayNodeName()).setMtu(options.getMTU());
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) builder.setMetered(false);
-        Network physical = physicalNetwork();
-        if (physical != null) builder.setUnderlyingNetworks(new Network[]{physical});
-
-        addAddresses(builder, options.getInet4Address());
-        addAddresses(builder, options.getInet6Address());
-
-        if (options.getAutoRoute()) {
-            builder.addDnsServer(options.getDNSServerAddress().getValue());
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                int v4 = addRoutes(builder, options.getInet4RouteAddress(), false);
-                if (v4 == 0) builder.addRoute("0.0.0.0", 0);
-                int v6 = addRoutes(builder, options.getInet6RouteAddress(), false);
-                if (v6 == 0) builder.addRoute("::", 0);
-                addRoutes(builder, options.getInet4RouteExcludeAddress(), true);
-                addRoutes(builder, options.getInet6RouteExcludeAddress(), true);
-            } else {
-                if (addLegacyRoutes(builder, options.getInet4RouteRange()) == 0) builder.addRoute("0.0.0.0", 0);
-                if (addLegacyRoutes(builder, options.getInet6RouteRange()) == 0) builder.addRoute("::", 0);
-            }
-            addPackages(builder, options.getIncludePackage(), true);
-            addPackages(builder, options.getExcludePackage(), false);
-        }
-
-        ParcelFileDescriptor descriptor = builder.establish();
-        if (descriptor == null) throw new IllegalStateException("系统未能建立 VPN 接口");
-        ParcelFileDescriptor old = tunDescriptor;
-        tunDescriptor = descriptor;
-        if (old != null) try { old.close(); } catch (Exception ignored) {}
-        return descriptor.getFd();
-    }
-
-    private void addAddresses(Builder builder, RoutePrefixIterator iterator) {
-        if (iterator == null) return;
-        while (iterator.hasNext()) {
-            RoutePrefix prefix = iterator.next();
-            builder.addAddress(prefix.address(), prefix.prefix());
-        }
-    }
-
-    // Calls are guarded by SDK_INT >= 33 in openTun; keep the project AndroidX-free.
-    @android.annotation.SuppressLint("UseRequiresApi")
-    @android.annotation.TargetApi(Build.VERSION_CODES.TIRAMISU)
-    private int addRoutes(Builder builder, RoutePrefixIterator iterator, boolean exclude) {
-        int count = 0;
-        if (iterator == null) return count;
-        while (iterator.hasNext()) {
-            RoutePrefix route = iterator.next();
-            IpPrefix prefix;
-            try {
-                prefix = new IpPrefix(InetAddress.getByName(route.address()), route.prefix());
-            } catch (Exception invalidRoute) {
-                throw new IllegalArgumentException("内核返回了无效路由：" + route.string(), invalidRoute);
-            }
-            if (exclude) builder.excludeRoute(prefix); else builder.addRoute(prefix);
-            count++;
-        }
-        return count;
-    }
-
-    private int addLegacyRoutes(Builder builder, RoutePrefixIterator iterator) {
-        int count=0;
-        if (iterator == null) return count;
-        while (iterator.hasNext()) {
-            RoutePrefix route = iterator.next();
-            builder.addRoute(route.address(), route.prefix());
-            count++;
-        }
-        return count;
-    }
-
-    private void addPackages(Builder builder, StringIterator iterator, boolean allowed) {
-        if (iterator == null) return;
-        while (iterator.hasNext()) {
-            String packageName = iterator.next();
-            if (packageName == null || packageName.isEmpty()) continue;
-            try {
-                if (allowed) builder.addAllowedApplication(packageName);
-                else builder.addDisallowedApplication(packageName);
-            } catch (PackageManager.NameNotFoundException error) {
-                Log.w(TAG, "Package rule skipped: " + packageName);
-            }
-        }
-    }
-
-    @Override public boolean useProcFS() { return Build.VERSION.SDK_INT < Build.VERSION_CODES.Q; }
-
-    @Override public ConnectionOwner findConnectionOwner(int protocol, String sourceAddress, int sourcePort,
-                                                          String destinationAddress, int destinationPort) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) throw new IllegalStateException("连接归属查询不可用");
-        int uid = connectivity.getConnectionOwnerUid(protocol,
-                new InetSocketAddress(sourceAddress, sourcePort),
-                new InetSocketAddress(destinationAddress, destinationPort));
-        if (uid == Process.INVALID_UID) throw new IllegalStateException("未找到连接所属应用");
-        String[] packages = getPackageManager().getPackagesForUid(uid);
-        ConnectionOwner owner = new ConnectionOwner();
-        owner.setUserId(uid);
-        owner.setUserName(packages != null && packages.length > 0 ? packages[0] : "");
-        owner.setProcessPath("");
-        owner.setAndroidPackageNames(new StringArray(packages));
-        return owner;
-    }
-
-    @Override public void startDefaultInterfaceMonitor(InterfaceUpdateListener listener) {
-        interfaceListener = listener;
-        if (networkCallback == null) {
-            networkCallback = new ConnectivityManager.NetworkCallback() {
-                @Override public void onAvailable(Network network) { underlyingNetwork = network; updateDefaultInterface(); }
-                @Override public void onLost(Network network) {
-                    if (network.equals(underlyingNetwork)) underlyingNetwork = null;
-                    updateDefaultInterface();
-                }
-                @Override public void onLinkPropertiesChanged(Network network, LinkProperties properties) { updateDefaultInterface(); }
-                @Override public void onCapabilitiesChanged(Network network, NetworkCapabilities capabilities) { updateDefaultInterface(); }
-            };
-            NetworkRequest request = new NetworkRequest.Builder()
-                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                    .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
-                    .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
-                    .build();
-            Handler main = new Handler(Looper.getMainLooper());
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                connectivity.registerBestMatchingNetworkCallback(request, networkCallback, main);
-            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                connectivity.requestNetwork(request, networkCallback, main);
-            } else {
-                connectivity.registerDefaultNetworkCallback(networkCallback, main);
-            }
-        }
-        updateDefaultInterface();
-    }
-
-    @Override public void closeDefaultInterfaceMonitor(InterfaceUpdateListener listener) {
-        interfaceListener = null;
-        closeNetworkMonitor();
-    }
-
-    private void closeNetworkMonitor() {
-        ConnectivityManager.NetworkCallback callback = networkCallback;
-        networkCallback = null;
-        underlyingNetwork = null;
-        if (callback != null && connectivity != null) {
-            try { connectivity.unregisterNetworkCallback(callback); } catch (Exception ignored) {}
-        }
-    }
-
-    private void updateDefaultInterface() {
-        InterfaceUpdateListener listener = interfaceListener;
-        if (listener == null) return;
-        try {
-            Network network = physicalNetwork();
-            // Keep Android's VPN transport hint aligned with sing-box's
-            // selected interface after Wi-Fi/cellular handover. Without this,
-            // Android may continue treating a disconnected network as the
-            // tunnel's underlying transport even though Core has moved on.
-            setUnderlyingNetworks(network == null ? null : new Network[]{network});
-            LinkProperties link = network == null ? null : connectivity.getLinkProperties(network);
-            if (link == null || link.getInterfaceName() == null) {
-                listener.updateDefaultInterface("", -1, false, false);
-                return;
-            }
-            java.net.NetworkInterface netIf = java.net.NetworkInterface.getByName(link.getInterfaceName());
-            NetworkCapabilities caps = connectivity.getNetworkCapabilities(network);
-            boolean metered = caps == null || !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED);
-            listener.updateDefaultInterface(link.getInterfaceName(), netIf == null ? -1 : netIf.getIndex(), metered, false);
-        } catch (Exception error) {
-            Log.w(TAG, "Default interface update failed", error);
-            listener.updateDefaultInterface("", -1, false, false);
-        }
-    }
-
-    @Override public NetworkInterfaceIterator getInterfaces() {
-        List<io.nekohasekai.libbox.NetworkInterface> out = new ArrayList<>();
-        for (Network network : connectivity.getAllNetworks()) {
-            LinkProperties link = connectivity.getLinkProperties(network);
-            NetworkCapabilities caps = connectivity.getNetworkCapabilities(network);
-            if (link == null || caps == null || link.getInterfaceName() == null) continue;
-            // Never feed XVPN's own TUN back into sing-box auto detection.
-            if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
-                    || caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue;
-            try {
-                java.net.NetworkInterface source = java.net.NetworkInterface.getByName(link.getInterfaceName());
-                if (source == null) continue;
-                io.nekohasekai.libbox.NetworkInterface item = new io.nekohasekai.libbox.NetworkInterface();
-                item.setName(source.getName());
-                item.setIndex(source.getIndex());
-                item.setMTU(source.getMTU());
-                item.setFlags(interfaceFlags(source, caps));
-                item.setType(interfaceType(caps));
-                item.setMetered(!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED));
-
-                List<String> addresses = new ArrayList<>();
-                for (java.net.InterfaceAddress address : source.getInterfaceAddresses()) {
-                    String host = address.getAddress().getHostAddress();
-                    if (host == null) continue;
-                    int zone = host.indexOf('%');
-                    if (zone >= 0) host = host.substring(0, zone);
-                    addresses.add(host + "/" + address.getNetworkPrefixLength());
-                }
-                List<String> dns = new ArrayList<>();
-                for (java.net.InetAddress server : link.getDnsServers()) {
-                    if (server.getHostAddress() != null) dns.add(server.getHostAddress());
-                }
-                item.setAddresses(new StringArray(addresses));
-                item.setDNSServer(new StringArray(dns));
-                out.add(item);
-            } catch (Exception error) {
-                Log.w(TAG, "Interface skipped: " + link.getInterfaceName(), error);
-            }
-        }
-        return new InterfaceArray(out);
-    }
-
     private Network physicalNetwork() {
-        Network preferred = underlyingNetwork;
-        NetworkCapabilities preferredCaps = preferred == null ? null : connectivity.getNetworkCapabilities(preferred);
-        if (preferredCaps != null && preferredCaps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                && preferredCaps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
-                && !preferredCaps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return preferred;
-        Network transportFallback = null;
+        if (connectivity == null) return null;
         Network fallback = null;
         for (Network network : connectivity.getAllNetworks()) {
             NetworkCapabilities caps = connectivity.getNetworkCapabilities(network);
             if (caps == null || !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
                     || !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
                     || caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue;
-            boolean commonTransport=caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+            boolean common = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
                     || caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
                     || caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET);
-            if (commonTransport&&caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) return network;
-            if (commonTransport&&transportFallback==null)transportFallback=network;
+            if (common && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) return network;
             if (fallback == null) fallback = network;
         }
-        return transportFallback!=null?transportFallback:fallback;
+        return fallback;
     }
 
-    private int interfaceFlags(java.net.NetworkInterface source, NetworkCapabilities caps) {
-        int flags = 0;
-        try { if (source.isUp()) flags |= OsConstants.IFF_UP | OsConstants.IFF_RUNNING; } catch (Exception ignored) {}
-        try { if (source.isLoopback()) flags |= OsConstants.IFF_LOOPBACK; } catch (Exception ignored) {}
-        try { if (source.isPointToPoint()) flags |= OsConstants.IFF_POINTOPOINT; } catch (Exception ignored) {}
-        try { if (source.supportsMulticast()) flags |= OsConstants.IFF_MULTICAST; } catch (Exception ignored) {}
-        return flags;
-    }
+    // ----- Mihomo-native metrics + Panel cumulative reporting -----
 
-    private int interfaceType(NetworkCapabilities caps) {
-        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return Libbox.InterfaceTypeWIFI;
-        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) return Libbox.InterfaceTypeCellular;
-        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) return Libbox.InterfaceTypeEthernet;
-        return Libbox.InterfaceTypeOther;
-    }
-
-    @Override public boolean underNetworkExtension() { return false; }
-    @Override public boolean includeAllNetworks() { return false; }
-    @Override public WIFIState readWIFIState() { return null; }
-    @Override public LocalDNSTransport localDNSTransport() { return null; }
-    @Override public void clearDNSCache() {}
-
-    @Override public StringIterator systemCertificates() {
-        List<String> certificates = new ArrayList<>();
+    private long[] coreTraffic(boolean totals) {
         try {
-            KeyStore store = KeyStore.getInstance("AndroidCAStore");
-            store.load(null);
-            Enumeration<String> aliases = store.aliases();
-            while (aliases.hasMoreElements()) {
-                Certificate certificate = store.getCertificate(aliases.nextElement());
-                if (certificate == null) continue;
-                certificates.add("-----BEGIN CERTIFICATE-----\n"
-                        + Base64.encodeToString(certificate.getEncoded(), Base64.NO_WRAP)
-                        + "\n-----END CERTIFICATE-----");
-            }
-        } catch (Exception error) {
-            Log.w(TAG, "Unable to read Android CA store", error);
-        }
-        return new StringArray(certificates);
+            String raw = totals ? Clash.INSTANCE.getTotalTraffic() : Clash.INSTANCE.getTraffic();
+            JSONObject json = new JSONObject(raw);
+            return new long[]{Math.max(0L, json.optLong("up", 0L)), Math.max(0L, json.optLong("down", 0L))};
+        } catch (Throwable ignored) { return new long[]{0L, 0L}; }
     }
-
-    @Override public void sendNotification(Notification notification) {
-        if (notification != null && notification.getBody() != null) {
-            Log.i(TAG, "Core notification: " + notification.getBody());
-        }
-    }
-
-    // ----- libbox command callbacks -----
-
-    @Override public void serviceStop() { requestStop(); }
-    @Override public void serviceReload() { Log.i(TAG, "Core requested reload; keeping current validated profile"); }
-
-    @Override public SystemProxyStatus getSystemProxyStatus() {
-        SystemProxyStatus status = new SystemProxyStatus();
-        status.setAvailable(false);
-        status.setEnabled(false);
-        return status;
-    }
-
-    @Override public void setSystemProxyEnabled(boolean enabled) {}
-    @Override public void writeDebugMessage(String message) { if (BuildConfig.DEBUG) Log.d(TAG, value(message)); }
-
-    // ----- Metrics and Panel cumulative reporting -----
 
     private void startMetricsAndReporting() {
-        long tx = safeTraffic(TrafficStats.getUidTxBytes(Process.myUid()));
-        long rx = safeTraffic(TrafficStats.getUidRxBytes(Process.myUid()));
-        baselineTx = previousTx = tx;
-        baselineRx = previousRx = rx;
-        previousMetricAt = SystemClock.elapsedRealtime();
+        long[] baseline = coreTraffic(true);
+        coreBaselineUp = baseline[0];
+        coreBaselineDown = baseline[1];
         uploadTotal = downloadTotal = 0L;
         recordedUploadTotal = recordedDownloadTotal = 0L;
-        lastLocalTrafficPersistAt = previousMetricAt;
+        lastLocalTrafficPersistAt = SystemClock.elapsedRealtime();
+        lastNotificationAt = 0L;
 
         metricsExecutor = Executors.newSingleThreadScheduledExecutor();
         metricsExecutor.scheduleWithFixedDelay(this::updateMetricsSnapshot, 1L, 1L, TimeUnit.SECONDS);
 
-        SharedPreferences prefs = getSharedPreferences("xvpn_preferences_v1", MODE_PRIVATE);
+        SharedPreferences prefs = getSharedPreferences(APP_PREFS, MODE_PRIVATE);
         if (!prefs.getBoolean("traffic_reporting", false)) return;
-        long interval = prefs.getLong("traffic_report_interval_seconds", 5L);
-        interval = Math.max(5L, Math.min(300L, interval));
+        long interval = Math.max(5L, Math.min(300L, prefs.getLong("traffic_report_interval_seconds", 5L)));
         reportExecutor = Executors.newSingleThreadScheduledExecutor();
         reportExecutor.scheduleWithFixedDelay(() -> {
             ReportSnapshot report = currentReportSnapshot();
@@ -982,29 +614,22 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
 
     private void updateMetricsSnapshot() {
         int state = CoreState.read(this).state;
-        if (state != CoreState.RUNNING && state != CoreState.SWITCHING
-                && state != CoreState.STOPPING && !stopRequested.get()) return;
-        long now = SystemClock.elapsedRealtime();
-        long tx = safeTraffic(TrafficStats.getUidTxBytes(Process.myUid()));
-        long rx = safeTraffic(TrafficStats.getUidRxBytes(Process.myUid()));
-        long elapsed = Math.max(1L, now - previousMetricAt);
-        long upRate = Math.max(0L, tx - previousTx) * 1000L / elapsed;
-        long downRate = Math.max(0L, rx - previousRx) * 1000L / elapsed;
-        uploadTotal = Math.max(0L, tx - baselineTx);
-        downloadTotal = Math.max(0L, rx - baselineRx);
-        previousTx = tx;
-        previousRx = rx;
-        previousMetricAt = now;
-        CoreState.publishMetrics(this, uploadTotal, downloadTotal, upRate, downRate);
+        if (state != CoreState.RUNNING && state != CoreState.SWITCHING && state != CoreState.STOPPING && !stopRequested.get()) return;
+        long[] rates = coreTraffic(false);
+        long[] totals = coreTraffic(true);
+        uploadTotal = Math.max(0L, totals[0] - coreBaselineUp);
+        downloadTotal = Math.max(0L, totals[1] - coreBaselineDown);
+        CoreState.publishMetrics(this, uploadTotal, downloadTotal, rates[0], rates[1]);
         persistLocalTrafficDelta(false);
+        long now = SystemClock.elapsedRealtime();
         if (state == CoreState.RUNNING && now - lastNotificationAt >= 2000L) {
             lastNotificationAt = now;
-            updateForegroundNotification("XVPN 已连接", connectedNotificationText(upRate, downRate), true);
+            updateForegroundNotification("XVPN 已连接", connectedNotificationText(rates[0], rates[1]), true);
         }
     }
 
     private ReportSnapshot currentReportSnapshot() {
-        SharedPreferences prefs = getSharedPreferences("xvpn_preferences_v1", MODE_PRIVATE);
+        SharedPreferences prefs = getSharedPreferences(APP_PREFS, MODE_PRIVATE);
         if (!prefs.getBoolean("traffic_reporting", false) || nodeId <= 0 || sessionId.isEmpty()) return null;
         return new ReportSnapshot(nodeId, sessionId, uploadTotal, downloadTotal);
     }
@@ -1012,41 +637,30 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
     private void reportTrafficSafe(ReportSnapshot report) {
         if (report == null) return;
         try {
-            SharedPreferences prefs = getSharedPreferences("xvpn_preferences_v1", MODE_PRIVATE);
+            SharedPreferences prefs = getSharedPreferences(APP_PREFS, MODE_PRIVATE);
             String panel = ApiClient.normalizePanelBase(prefs.getString("base_url", ""));
             String auth = SecureTokenStore.load(prefs);
             if (panel.isEmpty() || auth == null || auth.isEmpty()) return;
-
-            String deviceId = persistentDeviceId();
             JSONObject body = new JSONObject()
-                    .put("device_id", deviceId)
+                    .put("device_id", persistentDeviceId())
                     .put("session_id", report.sessionId)
                     .put("node_id", report.nodeId)
                     .put("upload_total_bytes", Math.max(0L, report.uploadTotal))
                     .put("download_total_bytes", Math.max(0L, report.downloadTotal))
                     .put("app_version", BuildConfig.VERSION_NAME);
             ApiClient.request(panel, "/traffic/report", "POST", auth, body);
-            if (versionBlockNotified.getAndSet(false)) {
-                updateForegroundNotification("XVPN 已连接", connectedNotificationText(0L, 0L), true);
-            }
+            if (versionBlockNotified.getAndSet(false)) updateForegroundNotification("XVPN 已连接", connectedNotificationText(0L, 0L), true);
         } catch (ApiClient.ApiException error) {
             if (error.isVersionBlocked()) {
-                // Keep an already verified tunnel alive long enough for the
-                // mandatory in-app updater to work under Android lockdown.
-                // MainActivity blocks every normal action until installation;
-                // tearing down here would leave a lockdown device with no path
-                // to download the required APK.
                 if (versionBlockNotified.compareAndSet(false, true)) {
                     CoreState.notifyVersionBlocked(this);
-                    updateForegroundNotification("XVPN 需要更新",
-                            displayNodeName() + " · 请返回 App 完成更新", true);
+                    updateForegroundNotification("XVPN 需要更新", displayNodeName() + " · 请返回 App 完成更新", true);
                 }
             } else if (error.isAuthFailure()) {
                 SecureVpnProfileStore.clear(this);
                 CoreState.notifyAuthInvalid(this, error.code);
                 requestStop();
             } else if ("INVALID_NODE_ID".equals(error.code)) {
-                // A final report from the previous hot-switched node must not tear down the new node.
                 if (report.sessionId.equals(sessionId)) {
                     SecureVpnProfileStore.clear(this);
                     CoreState.notifyNodeInvalid(this);
@@ -1055,9 +669,7 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
             } else if (!"TRAFFIC_USER_REQUIRED".equals(error.code)) {
                 Log.w(TAG, "Traffic report rejected: " + error.code);
             }
-        } catch (Exception error) {
-            Log.w(TAG, "Traffic report deferred", error);
-        }
+        } catch (Exception error) { Log.w(TAG, "Traffic report deferred", error); }
     }
 
     private String persistentDeviceId() {
@@ -1076,14 +688,12 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
         ScheduledExecutorService metrics = metricsExecutor;
         metricsExecutor = null;
         if (metrics != null) metrics.shutdownNow();
-
         ScheduledExecutorService reports = reportExecutor;
         reportExecutor = null;
         if (reports != null) reports.shutdownNow();
         if (finalSnapshot != null) reportIo.execute(() -> reportTrafficSafe(finalSnapshot));
     }
 
-    /** Keeps useful traffic totals even when a Panel account does not return aggregate fields. */
     private synchronized void persistLocalTrafficDelta(boolean force) {
         long nextUp = Math.max(0L, uploadTotal);
         long nextDown = Math.max(0L, downloadTotal);
@@ -1093,7 +703,7 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
         long now = SystemClock.elapsedRealtime();
         if (!force && now - lastLocalTrafficPersistAt < 5000L && deltaUp + deltaDown < 65536L) return;
 
-        SharedPreferences prefs = getSharedPreferences("xvpn_preferences_v1", MODE_PRIVATE);
+        SharedPreferences prefs = getSharedPreferences(APP_PREFS, MODE_PRIVATE);
         String day = java.time.LocalDate.now().toString();
         String month = day.length() >= 7 ? day.substring(0, 7) : day;
         boolean sameDay = day.equals(prefs.getString("local_traffic_day_key", ""));
@@ -1117,60 +727,35 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
         lastLocalTrafficPersistAt = now;
     }
 
-    private long safeTraffic(long value) { return value < 0L ? 0L : value; }
-
     // ----- Foreground notification -----
 
     private void createNotificationChannels() {
         NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-        NotificationChannel channel = new NotificationChannel(
-                NOTIFICATION_CHANNEL, "XVPN 连接状态", NotificationManager.IMPORTANCE_LOW);
+        NotificationChannel channel = new NotificationChannel(NOTIFICATION_CHANNEL, "XVPN 连接状态", NotificationManager.IMPORTANCE_LOW);
         channel.setDescription("显示当前节点、分流模式、实时速率与安全断开操作");
         channel.setShowBadge(false);
         channel.setSound(null, null);
         channel.enableVibration(false);
-        channel.enableLights(false);
-        channel.setLockscreenVisibility(android.app.Notification.VISIBILITY_PRIVATE);
         manager.createNotificationChannel(channel);
     }
 
-    private android.app.Notification serviceNotification(String title, String content,
-                                                         boolean ongoing, boolean chronometer) {
+    private android.app.Notification serviceNotification(String title, String content, boolean ongoing, boolean chronometer) {
         PendingIntent open = PendingIntent.getActivity(this, 0,
                 new Intent(this, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT),
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         PendingIntent stop = PendingIntent.getService(this, 1,
                 new Intent(this, VpnCoreService.class).setAction(ACTION_STOP),
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-        android.app.Notification.Builder builder = new android.app.Notification.Builder(this, NOTIFICATION_CHANNEL);
         CoreState.Snapshot snapshot = CoreState.read(this);
         String connectionLine = displayNodeName() + " · " + routeLabel;
-        android.app.Notification.Style style;
-        if (chronometer) {
-            style = new android.app.Notification.InboxStyle()
-                    .setBigContentTitle(title)
+        android.app.Notification.Style style = chronometer
+                ? new android.app.Notification.InboxStyle().setBigContentTitle(title)
                     .addLine(connectionLine)
                     .addLine("↑ " + compactRate(snapshot.uploadRate) + "    ↓ " + compactRate(snapshot.downloadRate))
-                    .addLine("网络健康 · DNS 与代理出口已验证")
-                    .setSummaryText("PRIVATE NETWORK");
-        } else {
-            style = new android.app.Notification.BigTextStyle()
-                    .setBigContentTitle(title)
-                    .bigText(content)
-                    .setSummaryText("PRIVATE NETWORK");
-        }
-        android.app.Notification publicVersion = new android.app.Notification.Builder(this, NOTIFICATION_CHANNEL)
+                    .addLine("Mihomo · DNS 与代理出口已验证").setSummaryText("PRIVATE NETWORK")
+                : new android.app.Notification.BigTextStyle().setBigContentTitle(title).bigText(content).setSummaryText("PRIVATE NETWORK");
+        android.app.Notification.Builder builder = new android.app.Notification.Builder(this, NOTIFICATION_CHANNEL)
                 .setSmallIcon(R.drawable.ic_vpn_status)
-                .setContentTitle(chronometer ? "XVPN 已连接" : title)
-                .setContentText(chronometer ? "VPN 保护正在运行" : "VPN 服务状态")
-                .setOngoing(ongoing)
-                .setOnlyAlertOnce(true)
-                .setColor(chronometer ? 0xFF22B78B : 0xFF6487FF)
-                .setShowWhen(false)
-                .setVisibility(android.app.Notification.VISIBILITY_PUBLIC)
-                .setCategory(android.app.Notification.CATEGORY_SERVICE)
-                .build();
-        builder.setSmallIcon(R.drawable.ic_vpn_status)
                 .setContentTitle(title)
                 .setContentText(chronometer ? connectionLine : content)
                 .setSubText("PRIVATE NETWORK")
@@ -1180,23 +765,15 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
                 .setAutoCancel(false)
                 .setOnlyAlertOnce(true)
                 .setColor(chronometer ? 0xFF22B78B : 0xFF6487FF)
-                .setColorized(false)
                 .setVisibility(android.app.Notification.VISIBILITY_PRIVATE)
-                .setPublicVersion(publicVersion)
                 .setCategory(android.app.Notification.CATEGORY_SERVICE)
                 .addAction(new android.app.Notification.Action.Builder(
                         Icon.createWithResource(this, R.drawable.ic_vpn_status), "安全断开", stop).build());
         if (chronometer) {
-            long startedAt = CoreState.read(this).startedAt;
-            builder.setWhen(startedAt > 0L ? startedAt : System.currentTimeMillis())
-                    .setUsesChronometer(true)
-                    .setShowWhen(true);
-        } else {
-            builder.setShowWhen(false).setUsesChronometer(false);
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            builder.setForegroundServiceBehavior(android.app.Notification.FOREGROUND_SERVICE_IMMEDIATE);
-        }
+            long startedAt = snapshot.startedAt;
+            builder.setWhen(startedAt > 0L ? startedAt : System.currentTimeMillis()).setUsesChronometer(true).setShowWhen(true);
+        } else builder.setShowWhen(false).setUsesChronometer(false);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) builder.setForegroundServiceBehavior(android.app.Notification.FOREGROUND_SERVICE_IMMEDIATE);
         return builder.build();
     }
 
@@ -1208,36 +785,28 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
     private String displayNodeName() { return nodeName.isEmpty() ? "XVPN 节点" : nodeName; }
 
     private String connectedNotificationText(long uploadRate, long downloadRate) {
-        return displayNodeName() + " · " + routeLabel + "   ↑ " + compactRate(uploadRate)
-                + "   ↓ " + compactRate(downloadRate);
+        return displayNodeName() + " · " + routeLabel + "   ↑ " + compactRate(uploadRate) + "   ↓ " + compactRate(downloadRate);
     }
 
     private String compactRate(long bytesPerSecond) {
-        double value = Math.max(0L, bytesPerSecond);
+        double number = Math.max(0L, bytesPerSecond);
         String[] units = {"B/s", "KB/s", "MB/s", "GB/s"};
         int unit = 0;
-        while (value >= 1024d && unit < units.length - 1) {
-            value /= 1024d;
-            unit++;
-        }
-        if (unit == 0) return ((long) value) + " " + units[unit];
-        return String.format(Locale.US, value >= 100d ? "%.0f %s" : "%.1f %s", value, units[unit]);
+        while (number >= 1024d && unit < units.length - 1) { number /= 1024d; unit++; }
+        if (unit == 0) return ((long) number) + " " + units[unit];
+        return String.format(Locale.US, number >= 100d ? "%.0f %s" : "%.1f %s", number, units[unit]);
     }
 
     private String friendlyCoreError(Throwable error) {
+        if (error instanceof MinimumVersionException) return "当前版本已停用，请更新 XVPN 后继续使用";
         String message = error == null ? "" : value(error.getMessage());
         String lower = message.toLowerCase(Locale.ROOT);
-        if (lower.contains("permission") || lower.contains("prepared") || lower.contains("revoked")) {
-            return "VPN 授权已失效，请重新连接";
-        }
-        if (lower.contains("detour to an empty direct outbound")) {
-            return "DNS 直连配置与当前内核不兼容，请更新客户端";
-        }
+        if (lower.contains("permission") || lower.contains("prepared") || lower.contains("revoked")) return "VPN 授权已失效，请重新连接";
         if (lower.contains("reality") && lower.contains("public")) return "节点 REALITY 公钥配置无效";
-        if (lower.contains("unknown outbound") || lower.contains("unsupported")) return "当前节点协议暂不受此版本支持";
-        if (message.isEmpty()) return "内核启动失败，请检查节点配置";
+        if (lower.contains("unsupported") || lower.contains("not support")) return "当前节点协议暂不受 Mihomo 测试版支持";
+        if (message.isEmpty()) return "Mihomo 内核启动失败，请检查节点配置";
         message = message.replaceAll("(?i)(vless|trojan|vmess|ss|shadowsocks|hysteria2|hy2|tuic|anytls)://[^\\s]+", "$1://••••")
-                .replaceAll("(?i)(\"(?:password|uuid|private_key|token)\"\\s*:\\s*\")[^\"]*(\")", "$1••••$2")
+                .replaceAll("(?i)(\"(?:password|uuid|private-key|token)\"\\s*:\\s*\")[^\"]*(\")", "$1••••$2")
                 .replaceAll("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", "••••");
         return message.length() > 220 ? message.substring(0, 220) + "…" : message;
     }
@@ -1248,23 +817,25 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
     }
 
     private static String normalizeHealthTarget(String target) {
-        String candidate=value(target);
-        if(candidate.isEmpty()) return "";
-        if(!candidate.contains("://")) candidate="https://"+candidate;
+        String candidate = value(target);
+        if (candidate.isEmpty()) return "";
+        if (!candidate.contains("://")) candidate = "https://" + candidate;
         try {
-            URL url=new URL(candidate);
-            String scheme=url.getProtocol();
-            if(!"http".equalsIgnoreCase(scheme)&&!"https".equalsIgnoreCase(scheme)) return "";
-            if(value(url.getHost()).isEmpty()||url.getUserInfo()!=null) return "";
-            int port=url.getPort();
-            if(port==0||port>65535) return "";
+            URL url = new URL(candidate);
+            String scheme = url.getProtocol();
+            if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme)) return "";
+            if (value(url.getHost()).isEmpty() || url.getUserInfo() != null) return "";
+            int port = url.getPort();
+            if (port == 0 || port > 65535) return "";
             return url.toExternalForm();
-        } catch (Exception ignored) {
-            return "";
-        }
+        } catch (Exception ignored) { return ""; }
     }
 
     private static String value(String text) { return text == null ? "" : text.trim(); }
+
+    private static final class MinimumVersionException extends RuntimeException {
+        MinimumVersionException() { super("当前版本已停用，请更新 XVPN 后继续使用"); }
+    }
 
     static final class TunnelHealth {
         final boolean healthy;
@@ -1279,13 +850,8 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
             this.error = value(error);
         }
 
-        static TunnelHealth success(String endpoint, long latencyMs) {
-            return new TunnelHealth(true, endpoint, latencyMs, "");
-        }
-
-        static TunnelHealth failure(String error) {
-            return new TunnelHealth(false, "", 0L, error);
-        }
+        static TunnelHealth success(String endpoint, long latencyMs) { return new TunnelHealth(true, endpoint, latencyMs, ""); }
+        static TunnelHealth failure(String error) { return new TunnelHealth(false, "", 0L, error); }
     }
 
     private static final class ReportSnapshot {
@@ -1299,35 +865,6 @@ public final class VpnCoreService extends VpnService implements PlatformInterfac
             this.sessionId = sessionId;
             this.uploadTotal = uploadTotal;
             this.downloadTotal = downloadTotal;
-        }
-    }
-
-    private static final class StringArray implements StringIterator {
-        private final List<String> values;
-        private int index;
-
-        StringArray(String[] source) {
-            values = new ArrayList<>();
-            if (source != null) for (String item : source) if (item != null) values.add(item);
-        }
-
-        StringArray(List<String> source) {
-            values = source == null ? new ArrayList<>() : new ArrayList<>(source);
-        }
-
-        @Override public boolean hasNext() { return index < values.size(); }
-        @Override public int len() { return Math.max(0, values.size() - index); }
-        @Override public String next() { return hasNext() ? values.get(index++) : ""; }
-    }
-
-    private static final class InterfaceArray implements NetworkInterfaceIterator {
-        private final List<io.nekohasekai.libbox.NetworkInterface> values;
-        private int index;
-
-        InterfaceArray(List<io.nekohasekai.libbox.NetworkInterface> values) { this.values = values; }
-        @Override public boolean hasNext() { return index < values.size(); }
-        @Override public io.nekohasekai.libbox.NetworkInterface next() {
-            return hasNext() ? values.get(index++) : null;
         }
     }
 }

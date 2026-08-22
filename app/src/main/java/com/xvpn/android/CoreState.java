@@ -35,6 +35,14 @@ final class CoreState {
 
     static void publishLifecycle(Context context, int state, int nodeId, String nodeName, String error) {
         Context app = context.getApplicationContext();
+        // Do not expose STOPPED until the Mihomo service/native TUN has
+        // actually completed teardown. This closes the rapid reconnect race.
+        if (state == STOPPED && VpnCoreService.isLive()) {
+            synchronized (LOCK) {
+                ensureLoaded(app);
+                if (current.isActive()) return;
+            }
+        }
         synchronized (LOCK) {
             ensureLoaded(app);
             long startedAt = (state == RUNNING || state == SWITCHING)

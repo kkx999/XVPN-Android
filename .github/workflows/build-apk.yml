@@ -5,13 +5,16 @@ on:
   push:
     branches:
       - main
+  pull_request:
+    branches:
+      - main
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-release-apk:
-    name: Build signed release APK
+    name: Build signed Mihomo APK
     runs-on: ubuntu-24.04
     timeout-minutes: 30
 
@@ -19,28 +22,155 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Setup JDK 17
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Setup Gradle
+      - name: Set up Gradle 8.13
         uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
 
-      - name: Build release APK
+      - name: Install Android SDK 36
+        shell: bash
         run: |
-          ./gradlew clean :app:assembleRelease
+          set -euo pipefail
+          SDKMANAGER="$(command -v sdkmanager || true)"
+          if [ -z "$SDKMANAGER" ]; then
+            SDKMANAGER="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          test -x "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "platforms;android-36" "build-tools;35.0.0"
 
-      - name: Generate SHA256
+      - name: Verify clean Mihomo architecture
+        shell: bash
         run: |
+          set -euo pipefail
+          VERSION_CODE="$(sed -nE 's/^[[:space:]]*versionCode[[:space:]]+([0-9]+).*/\1/p' app/build.gradle | head -n1)"
+          VERSION_NAME="$(sed -nE "s/^[[:space:]]*versionName[[:space:]]+'([^']+)'.*/\1/p" app/build.gradle | head -n1)"
+          test -n "$VERSION_CODE"
+          test -n "$VERSION_NAME"
+          test "$(tr -d '[:space:]' < VERSION)" = "$VERSION_NAME"
+          grep -Fq "applicationId 'com.xvpn.android'" app/build.gradle
+          grep -Fq "def mihomoWrapperVersion = '0.3.1'" app/build.gradle
+          grep -Fq "def mihomoCoreVersion = '1.19.28'" app/build.gradle
+          grep -Fq "def mihomoAarSha256 = 'cd3dfb461d2ae46666260b38048b77a272aa58cae33db22a374b57308bab69ef'" app/build.gradle
+          grep -Fq 'xvpn.node.v1' app/src/main/java/com/xvpn/android/NodeCatalog.java
+          grep -Fq 'import io.github.oviron.libmihomo.Clash;' app/src/main/java/com/xvpn/android/VpnCoreService.java
+          grep -Fq 'android:name=".MihomoRuleProvider"' app/src/main/AndroidManifest.xml
+          test ! -e app/src/main/java/com/xvpn/android/SingBoxConfigBuilder.java
+          test ! -e app/libs/libbox-1.13.19-arm64.aar
+          if grep -R -n -E 'io\.nekohasekai\.libbox|SingBoxConfigBuilder|assets/rules/.*\.srs' app; then
+            echo 'Legacy sing-box code or rules are still present'
+            exit 1
+          fi
+          echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
+          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+
+      - name: Restore permanent release signing key
+        if: ${{ github.event_name != 'pull_request' }}
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.XVPN_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.XVPN_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.XVPN_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.XVPN_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$KEYSTORE_BASE64"
+          test -n "$KEYSTORE_PASSWORD"
+          test -n "$KEY_ALIAS"
+          test -n "$KEY_PASSWORD"
+          KEYSTORE_PATH="${RUNNER_TEMP}/xvpn-release.jks"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
+          keytool -list -keystore "$KEYSTORE_PATH" -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" >/dev/null
+          echo "XVPN_KEYSTORE_FILE=$KEYSTORE_PATH" >> "$GITHUB_ENV"
+          echo "XVPN_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+          echo "XVPN_KEY_ALIAS=$KEY_ALIAS" >> "$GITHUB_ENV"
+          echo "XVPN_KEY_PASSWORD=$KEY_PASSWORD" >> "$GITHUB_ENV"
+
+      - name: Test pull request
+        if: ${{ github.event_name == 'pull_request' }}
+        shell: bash
+        run: gradle --no-daemon clean :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
+
+      - name: Build signed release
+        if: ${{ github.event_name != 'pull_request' }}
+        shell: bash
+        run: gradle --no-daemon clean :app:testReleaseUnitTest :app:lintRelease :app:assembleRelease
+
+      - name: Verify release APK
+        if: ${{ github.event_name != 'pull_request' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="app/build/outputs/apk/release/app-release.apk"
+          APKSIGNER="${ANDROID_HOME}/build-tools/35.0.0/apksigner"
+          AAPT="${ANDROID_HOME}/build-tools/35.0.0/aapt"
+          ZIPALIGN="${ANDROID_HOME}/build-tools/35.0.0/zipalign"
+          test -f "$APK"
+          "$ZIPALIGN" -c -P 16 4 "$APK"
+          SIGNATURE_OUTPUT="$("$APKSIGNER" verify --verbose --print-certs "$APK")"
+          printf '%s\n' "$SIGNATURE_OUTPUT"
+          printf '%s\n' "$SIGNATURE_OUTPUT" | grep -F 'Verified using v2 scheme (APK Signature Scheme v2): true'
+          BADGING="$("$AAPT" dump badging "$APK")"
+          printf '%s\n' "$BADGING" | grep -F "package: name='com.xvpn.android' versionCode='${VERSION_CODE}' versionName='${VERSION_NAME}'"
+          printf '%s\n' "$BADGING" | grep -F "sdkVersion:'26'"
+          printf '%s\n' "$BADGING" | grep -F "targetSdkVersion:'36'"
+          printf '%s\n' "$BADGING" | grep -F "native-code: 'arm64-v8a'"
+          unzip -Z1 "$APK" | grep -Fx 'lib/arm64-v8a/libclash.so'
+          unzip -Z1 "$APK" | grep -Fx 'lib/arm64-v8a/libmihomo-jni.so'
+          unzip -Z1 "$APK" | grep -Fx 'assets/mihomo-rules/geosite-cn.mrs'
+          unzip -Z1 "$APK" | grep -Fx 'assets/mihomo-rules/geoip-cn.mrs'
+          test "$(unzip -p "$APK" assets/mihomo-rules/geosite-cn.mrs | sha256sum | awk '{print $1}')" = 'a7368abc76702b0a7886d00054815df2fc0a1662239c916f1c4239c25e1af085'
+          test "$(unzip -p "$APK" assets/mihomo-rules/geoip-cn.mrs | sha256sum | awk '{print $1}')" = 'a7db74faad22913bd2d193be4c33d46dddc2e0948ebff9f0fff044bb6416a734'
+          if unzip -Z1 "$APK" | grep -E 'libbox\.so|assets/rules/.*\.srs'; then
+            echo 'Legacy sing-box files were packaged unexpectedly'
+            exit 1
+          fi
+          EXPECTED_CERT="$(tr -d ':[:space:]' < SIGNING_CERT_SHA256.txt | tr 'A-F' 'a-f')"
+          ACTUAL_CERT="$(printf '%s\n' "$SIGNATURE_OUTPUT" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n1 | tr -d ':[:space:]' | tr 'A-F' 'a-f')"
+          test "$ACTUAL_CERT" = "$EXPECTED_CERT"
+
+      - name: Prepare artifact
+        if: ${{ github.event_name != 'pull_request' }}
+        shell: bash
+        run: |
+          set -euo pipefail
           mkdir -p dist
-          cp app/build/outputs/apk/release/app-release.apk dist/XVPN.apk
+          APK_NAME="XVPN-v${VERSION_NAME}.apk"
+          cp app/build/outputs/apk/release/app-release.apk "dist/${APK_NAME}"
           cd dist
-          sha256sum XVPN.apk > SHA256SUMS.txt
+          sha256sum "$APK_NAME" > SHA256SUMS.txt
+
+      - name: Publish verified GitHub Release
+        if: ${{ github.event_name != 'pull_request' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="v${VERSION_NAME}"
+          TITLE="XVPN v${VERSION_NAME} · Panel v1 / Mihomo 正式版"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+            gh release edit "$TAG" --title "$TITLE" --notes-file RELEASE_NOTES.md --latest
+          else
+            gh release create "$TAG" dist/* \
+              --target "$GITHUB_SHA" \
+              --title "$TITLE" \
+              --notes-file RELEASE_NOTES.md \
+              --latest
+          fi
 
       - name: Upload APK
+        if: ${{ github.event_name != 'pull_request' }}
         uses: actions/upload-artifact@v4
         with:
-          name: XVPN-Android-v1.0.0
+          name: XVPN-v${{ env.VERSION_NAME }}
           path: dist/*
+          if-no-files-found: error
+          retention-days: 30

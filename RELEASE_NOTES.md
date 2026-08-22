@@ -1,24 +1,15 @@
-# XVPN Android 1.1.1-rc1
+# XVPN Android v1.0.0
 
-基于 1.1.0 的稳定性测试版，只针对本轮已确认问题做修复与系统能力补齐。
+全新 Mihomo 架构基线，配套 XVPN Panel v1.0.0。
 
-## 本版更新
-
-- 支持 Android Always-on VPN 与锁定模式；真实联网验证成功后才加密保存恢复配置，注销、撤销授权或服务端失效时立即清除。
-- 智能分流保持“私网 / 国内直连、其余代理”，TUN 同时接管 IPv4 与 IPv6 默认路由，并继续劫持 DNS，避免 IP、IPv6 与 DNS 绕过。
-- 连接状态以真实隧道联网检测为准；网络切换、模式切换与节点热切换失败时不再保留虚假已连接状态。
-- 节点入口测速继续使用物理网络 TCP 握手，连接前后口径一致；刷新、测速、优选和热切换互斥，避免并发覆盖结果。
-- 节点抽屉支持从顶部把手下拉关闭，打开与关闭动画、系统手势区衔接及明暗主题细节已优化。
-- 右上角刷新按钮改为主题化圆形对称双箭头，并增加加载旋转与完成反馈；出口 IP 使用新的主题化地球图标。
-- 更新流程优先在 App 内完成下载进度、大小、SHA-256、包名、版本号与固定签名校验，再交给 Android 系统安装器；最低版本限制由 Panel API 强制执行。
-- 流量上报默认改为 5 秒，继续使用累计计数和服务端去重，降低后台统计延迟。
-
-## 发布边界
-
-- Application ID：`com.xvpn.android`
-- 版本：`1.1.1-rc1`（`versionCode 10101`）
-- ABI：`arm64-v8a`
-- Android 8.0+，compile / target SDK 36
-- sing-box/libbox 与固定签名证书保持不变
-
-GitHub Actions 会执行单元测试、lint、Release 编译、签名、包名 / 版本 / ABI / 规则资产校验。Always-on、锁定模式、应用内安装、IPv6 防泄漏以及各协议真实连接仍须按 `QA_CHECKLIST.md` 在真机完成验收。
+- 保留现有 Logo、图片、登录注册、首页、主题、动画、节点抽屉、延迟测试、
+  自动优选、设置页和 App 更新界面。
+- 删除 sing-box/libbox、旧 SRS 规则、旧配置生成器和旧节点配置兼容路径。
+- 只接受 Panel 的 `xvpn.nodes.v1` / `xvpn.node.v1` 标准节点。
+- 使用 Mihomo v1.19.28 + libmihomo-android v0.3.1。
+- 支持 VLESS、VMess、Trojan、Shadowsocks、Hysteria2、TUIC、AnyTLS。
+- 智能分流使用校验固定的 MetaCubeX 中国域名/IP MRS 规则；全局模式保留
+  私网直连，其他公网流量全部代理。
+- IPv4/IPv6 TUN、DNS、真实联网验证、失败回滚、连接中切换、Always-on、
+  流量上报和通知卡片均接入新的 Mihomo 服务。
+- App 更新策略直接读取 Panel v1.0.0 `/api/v1/app/update`。

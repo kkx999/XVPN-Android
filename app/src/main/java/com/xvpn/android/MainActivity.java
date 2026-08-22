@@ -312,13 +312,19 @@ public final class MainActivity extends android.app.Activity {
         final int gen = ++screenGeneration;
         io.execute(() -> {
             try {
-                JSONObject boot = fetchBootstrapCompat(token, null);
+                JSONObject boot = fetchBootstrapV1(token, null);
+                AppUpdateChecker.Result requiredUpdate = fetchRequiredPanelUpdate();
                 runOnUiThread(() -> {
                     if (gen != screenGeneration || isFinishing()) return;
                     acceptBootstrap(boot);
                     loading.setText("安全配置已就绪");
                     finishLaunch(root, started, () -> {
                         showShell(TAB_HOME);
+                        if (requiredUpdate != null) {
+                            minimumVersionBlocked = true;
+                            blockedUpdate = requiredUpdate;
+                            if (currentRoot != null) currentRoot.post(() -> showUpdateSheet(requiredUpdate));
+                        }
                         scheduleInitialBestNodeScan();
                     });
                 });
@@ -595,10 +601,11 @@ public final class MainActivity extends android.app.Activity {
                 String newToken = out.optString("token", "").trim();
                 if (newToken.isEmpty()) throw new ApiClient.ApiException(0, "INVALID_RESPONSE", "服务器未返回登录令牌", 0);
 
-                // Panel v1.2 separates administrator App tokens from normal-user tokens.
+                // Panel v1 issues role-aware App tokens from normal-user tokens.
                 // Verify the freshly issued token against bootstrap before persisting it, so a
                 // failed/partially upgraded Panel cannot leave a bad token on the device.
-                JSONObject boot = fetchBootstrapCompat(newToken, out.optJSONObject("user"));
+                JSONObject boot = fetchBootstrapV1(newToken, out.optJSONObject("user"));
+                AppUpdateChecker.Result requiredUpdate = fetchRequiredPanelUpdate();
 
                 // SecureTokenStore.save() can throw because it uses Android Keystore. Keep it
                 // inside this worker-thread try/catch instead of the runOnUiThread lambda, whose
@@ -612,6 +619,11 @@ public final class MainActivity extends android.app.Activity {
                     username = out.optJSONObject("user") == null ? u : out.optJSONObject("user").optString("username", u);
                     acceptBootstrap(boot);
                     showShell(TAB_HOME);
+                    if (requiredUpdate != null) {
+                        minimumVersionBlocked = true;
+                        blockedUpdate = requiredUpdate;
+                        currentRoot.post(() -> showUpdateSheet(requiredUpdate));
+                    }
                     scheduleInitialBestNodeScan();
                 });
             } catch (Exception e) {
@@ -628,39 +640,12 @@ public final class MainActivity extends android.app.Activity {
         });
     }
 
-    private JSONObject fetchBootstrapCompat(String authToken, JSONObject loginUser) throws Exception {
-        ApiClient.ApiException bootstrapFailure=null;
-        try {
-            return ApiClient.request(baseUrl, "/app/bootstrap", "GET", authToken, null);
-        } catch (ApiClient.ApiException e) {
-            // Keep the older /me + /nodes composition for a missing bootstrap endpoint,
-            // and for a transient endpoint-specific 5xx. Authentication failures and
-            // normal API validation failures must never be masked by this fallback.
-            boolean compatFallback=e.status==404||e.status==405||(e.status>=500&&e.status<=599);
-            if(!compatFallback||e.isAuthFailure())throw e;
-            bootstrapFailure=e;
-        }
-
-        try {
-            JSONObject me = ApiClient.request(baseUrl, "/me", "GET", authToken, null);
-            JSONObject nodes = ApiClient.request(baseUrl, "/nodes", "GET", authToken, null);
-            JSONObject boot = new JSONObject();
-            boot.put("ok", true);
-            boot.put("api", "v1");
-            boot.put("version", "compat");
-            JSONObject meUser = me.optJSONObject("user");
-            boot.put("user", meUser != null ? meUser : (loginUser != null ? loginUser : new JSONObject()));
-            JSONObject nestedNodes = new JSONObject();
-            nestedNodes.put("total", nodes.optInt("total", 0));
-            nestedNodes.put("countries", nodes.optJSONArray("countries"));
-            boot.put("nodes", nestedNodes);
-            return boot;
-        } catch (Exception compatFailure) {
-            // The primary 5xx is usually the clearest diagnosis if both API
-            // shapes fail. For 404/405 keep the compatibility error instead.
-            if(bootstrapFailure!=null&&bootstrapFailure.status>=500)throw bootstrapFailure;
-            throw compatFailure;
-        }
+    private JSONObject fetchBootstrapV1(String authToken, JSONObject ignoredLoginUser) throws Exception {
+        JSONObject boot=ApiClient.request(baseUrl, "/app/bootstrap", "GET", authToken, null);
+        // Validation happens before the response can reach the UI. Old Panel
+        // payloads, sing-box config blobs and non-Mihomo node schemas are rejected.
+        NodeCatalog.fromBootstrap(boot);
+        return boot;
     }
 
     private void performRegister(EditText invite, EditText user, EditText pass, EditText confirm, Button button, ProgressBar busy) {
@@ -688,7 +673,8 @@ public final class MainActivity extends android.app.Activity {
         final int gen = coldStart ? ++screenGeneration : screenGeneration;
         io.execute(() -> {
             try {
-                JSONObject boot=fetchBootstrapCompat(token,null);
+                JSONObject boot=fetchBootstrapV1(token,null);
+                AppUpdateChecker.Result requiredUpdate = fetchRequiredPanelUpdate();
                 runOnUiThread(() -> {
                     refreshing=false;
                     finishRefreshMotion();
@@ -696,6 +682,11 @@ public final class MainActivity extends android.app.Activity {
                     acceptBootstrap(boot);
                     if(coldStart) showShell(currentTab);
                     else refreshHomeBoundViews();
+                    if (requiredUpdate != null) {
+                        minimumVersionBlocked = true;
+                        blockedUpdate = requiredUpdate;
+                        if (currentRoot != null) currentRoot.post(() -> showUpdateSheet(requiredUpdate));
+                    }
                     scheduleInitialBestNodeScan();
                 });
             } catch(Exception e) {
@@ -737,7 +728,8 @@ public final class MainActivity extends android.app.Activity {
         long updateInterval=Math.max(3600L,Math.min(7L*24L*3600L,boot.optLong("app_update_check_interval_seconds",43200L)));
         // Admin accounts were previously excluded here, which silently
         // disabled both Panel reports and the user's traffic cards.
-        boolean trafficReporting=boot.optBoolean("traffic_reporting",false);
+        String role=user==null?"":user.optString("role","");
+        boolean trafficReporting="user".equals(role)&&boot.optBoolean("traffic_reporting",false);
         edit.putLong("traffic_report_interval_seconds",reportInterval)
                 .putLong("app_update_check_interval_seconds",updateInterval)
                 .putBoolean("traffic_reporting",trafficReporting).apply();
@@ -875,7 +867,7 @@ private void setRouteMode(RouteMode mode) {
         if(core.state==CoreState.RUNNING){
             activeNode=catalog.find(core.nodeId);
             if(activeNode==null){toast("当前连接节点已不在列表中，请先刷新节点");return;}
-            try{reloadConfig=SingBoxConfigBuilder.build(this,activeNode,mode).toString();}
+            try{reloadConfig=MihomoProfileBuilder.build(this,activeNode,mode).toString();}
             catch(Exception e){toast(apiMessage(e));return;}
         }
         final String preparedConfig=reloadConfig;
@@ -1166,7 +1158,7 @@ private void setRouteMode(RouteMode mode) {
         if(notificationLabels instanceof LinearLayout&&((LinearLayout)notificationLabels).getChildCount()>1)((LinearLayout)notificationLabels).getChildAt(1).setTag("mine_notification_status");
         settings.addView(notificationRow,matchWrap());
         settings.addView(divider());
-        View versionRow=settingRow("版本",BuildConfig.VERSION_NAME + " · 检查更新",()->checkForUpdates(true));
+        View versionRow=settingRow("版本",BuildConfig.VERSION_NAME + " · "+MihomoProfileBuilder.CORE_LABEL+" · 检查更新",()->checkForUpdates(true));
         versionRow.setOnLongClickListener(v->{openAdvancedSettings(v);return true;});
         settings.addView(versionRow,matchWrap());
         page.addView(settings,matchWrap());
@@ -1307,7 +1299,7 @@ private void setRouteMode(RouteMode mode) {
         if(core.state==CoreState.STOPPING){toast("正在安全断开，请稍候…");return;}
         if(selectedNode==null){ toast("当前没有可用节点"); return; }
         try {
-            pendingCoreConfig=SingBoxConfigBuilder.build(this,selectedNode,routeMode).toString();
+            pendingCoreConfig=MihomoProfileBuilder.build(this,selectedNode,routeMode).toString();
             pendingCoreNodeId=selectedNode.id;
             pendingCoreNodeName=selectedNode.name;
             pendingCoreRouteLabel=routeMode.label;
@@ -1511,7 +1503,7 @@ private void setRouteMode(RouteMode mode) {
         if(core.isBusy()){toast("当前配置正在切换，请稍候…");return false;}
         if(core.state!=CoreState.RUNNING||core.nodeId==node.id)return true;
         try{
-            String config=SingBoxConfigBuilder.build(this,node,routeMode).toString();
+            String config=MihomoProfileBuilder.build(this,node,routeMode).toString();
             VpnCoreService.reconfigure(this,config,node.id,node.name,routeMode.label,
                     healthTarget==null||healthTarget.isEmpty()?latencyTestUrl():healthTarget);
             toast("正在切换至 "+node.name+"…");
@@ -1590,7 +1582,7 @@ private void setRouteMode(RouteMode mode) {
     private long measureNodeLatency(NodeCatalog.Node node) throws Exception { return measureNodeLatency(node,3000); }
 
     private long measureNodeLatency(NodeCatalog.Node node,int timeoutMs) throws Exception {
-        SingBoxConfigBuilder.Endpoint endpoint=SingBoxConfigBuilder.endpoint(node);
+        MihomoProfileBuilder.Endpoint endpoint=MihomoProfileBuilder.endpoint(node);
         if(!endpoint.tcpProbeSupported){
             throw new UdpProbeUnavailableException();
         }
@@ -1708,7 +1700,7 @@ private void setRouteMode(RouteMode mode) {
         CoreState.Snapshot core=CoreState.read(this);
         profile.addView(detailLine("当前节点",core.nodeName.isEmpty()?"—":core.nodeName),matchWrap());profile.addView(divider());
         profile.addView(detailLine("分流模式",routeMode.label),matchWrap());profile.addView(divider());
-        profile.addView(detailLine("网络配置",SingBoxConfigBuilder.NETWORK_PROFILE),matchWrap());sheet.addView(profile,matchWrap());gap(sheet,12);
+        profile.addView(detailLine("网络配置",MihomoProfileBuilder.NETWORK_PROFILE),matchWrap());sheet.addView(profile,matchWrap());gap(sheet,12);
         TextView result=text(core.state==CoreState.RUNNING?"准备检测…":"请先连接 VPN",12,core.state==CoreState.RUNNING?p.muted:p.warningText,true);result.setGravity(Gravity.CENTER);result.setPadding(dp(12),dp(12),dp(12),dp(12));result.setBackground(roundRect(p.surfaceAlt,15,0,0));sheet.addView(result,matchWrap());gap(sheet,12);
         Button run=primaryButton("开始检测");run.setEnabled(core.state==CoreState.RUNNING);run.setAlpha(run.isEnabled()?1f:.58f);sheet.addView(run,matchWrap());
         run.setOnClickListener(v->{
@@ -1950,7 +1942,7 @@ private void setRouteMode(RouteMode mode) {
 
     private NodeProbeResult measureConnectedCandidate(NodeCatalog.Node candidate,String healthTarget) {
         try{
-            String config=SingBoxConfigBuilder.build(this,candidate,routeMode).toString();
+            String config=MihomoProfileBuilder.build(this,candidate,routeMode).toString();
             VpnCoreService.reconfigure(this,config,candidate.id,candidate.name,routeMode.label,healthTarget);
             if(!awaitRunningNode(candidate.id,25000L)){
                 CoreState.Snapshot state=CoreState.read(this);
@@ -2131,7 +2123,7 @@ private void setRouteMode(RouteMode mode) {
     }
 
     private AppUpdateChecker.Result checkUpdateSources() throws Exception {
-        // Panel v1.2.2 owns update policy; GitHub is used only when the endpoint is unavailable.
+        // Panel v1.0.0 owns update policy; GitHub is used only when the endpoint is unavailable.
         if(baseUrl!=null && !baseUrl.isEmpty()) {
             try {
                 String query="/app/update?version_name="+Uri.encode(BuildConfig.VERSION_NAME)+"&version_code="+BuildConfig.VERSION_CODE;
@@ -2147,6 +2139,23 @@ private void setRouteMode(RouteMode mode) {
             }
         }
         return AppUpdateChecker.check();
+    }
+
+    /**
+     * Enforce the Panel's minimum-version policy before the user can start or
+     * restore a tunnel. A temporarily unavailable release source does not
+     * destroy a valid login session; the next scheduled/manual check retries.
+     */
+    private AppUpdateChecker.Result fetchRequiredPanelUpdate() {
+        if(baseUrl==null||baseUrl.isEmpty())return null;
+        try{
+            String query="/app/update?version_name="+Uri.encode(BuildConfig.VERSION_NAME)+"&version_code="+BuildConfig.VERSION_CODE;
+            JSONObject json=ApiClient.request(baseUrl,query,"GET",null,null);
+            AppUpdateChecker.Result result=updateResultFromJson(json,false);
+            return result.forceUpdate?result:null;
+        }catch(Exception ignored){
+            return null;
+        }
     }
 
     private AppUpdateChecker.Result updateResultFromJson(JSONObject json,boolean forceOverride){
