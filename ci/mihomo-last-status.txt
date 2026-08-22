@@ -1,11 +1,11 @@
-run_id=32570161333
-run_url=https://github.com/kkx999/XVPN-Android/actions/runs/32570161333
-source_commit=2532215802e1fb3a1c1b60466dbc65c775bf1648
+run_id=32571332337
+run_url=https://github.com/kkx999/XVPN-Android/actions/runs/32571332337
+source_commit=58cf2bab01572d2ea38fc0758ab761457d64dafc
 build=success
 verify=success
 prepare=success
 upload=success
-updated_utc=2026-08-22T11:25:28Z
+updated_utc=2026-08-22T11:51:31Z
 --- build-log-tail ---
 
 Welcome to Gradle 8.13!
@@ -34,8 +34,8 @@ Verified Mihomo CN geoip: a7db74faad22913bd2d193be4c33d46dddc2e0948ebff9f0fff044
 > Task :app:javaPreCompileRelease
 > Task :app:checkReleaseAarMetadata
 > Task :app:processReleaseNavigationResources
-> Task :app:compileReleaseNavigationResources
 > Task :app:generateReleaseResValues
+> Task :app:compileReleaseNavigationResources
 > Task :app:mapReleaseSourceSetPaths
 > Task :app:generateReleaseResources
 > Task :app:packageReleaseResources
@@ -46,8 +46,8 @@ Verified Mihomo CN geoip: a7db74faad22913bd2d193be4c33d46dddc2e0948ebff9f0fff044
 > Task :app:processReleaseManifest
 > Task :app:preReleaseUnitTestBuild
 > Task :app:javaPreCompileReleaseUnitTest
-> Task :app:processReleaseJavaRes NO-SOURCE
 > Task :app:processReleaseManifestForPackage
+> Task :app:processReleaseJavaRes NO-SOURCE
 > Task :app:processReleaseUnitTestJavaRes NO-SOURCE
 > Task :app:extractProguardFiles
 > Task :app:mergeReleaseJniLibFolders
@@ -59,16 +59,16 @@ Verified Mihomo CN geoip: a7db74faad22913bd2d193be4c33d46dddc2e0948ebff9f0fff044
 > Task :app:generateReleaseAssets UP-TO-DATE
 > Task :app:mergeReleaseAssets
 > Task :app:compressReleaseAssets
-> Task :app:extractReleaseVersionControlInfo
 > Task :app:mergeReleaseNativeLibs
+> Task :app:extractReleaseVersionControlInfo
 
 > Task :app:stripReleaseDebugSymbols
 Unable to strip the following libraries, packaging them as they are: libclash.so, libmihomo-jni.so. Run with --info option to learn more.
 
-> Task :app:mergeReleaseJavaResource
 > Task :app:extractReleaseNativeSymbolTables
-> Task :app:collectReleaseDependencies
 > Task :app:mergeReleaseNativeDebugMetadata NO-SOURCE
+> Task :app:mergeReleaseJavaResource
+> Task :app:collectReleaseDependencies
 > Task :app:sdkReleaseDependencyData
 > Task :app:validateSigningRelease
 > Task :app:writeReleaseAppMetadata
@@ -107,7 +107,7 @@ Note: Recompile with -Xlint:deprecation for details.
 Wrote HTML report to file:///home/runner/work/XVPN-Android/XVPN-Android/app/build/reports/lint-results-release.html
 
 > Task :app:lintRelease
-gradle/actions: Writing build results to /home/runner/work/_temp/.gradle-actions/build-results/build-1787397852157.json
+gradle/actions: Writing build results to /home/runner/work/_temp/.gradle-actions/build-results/build-1787399416536.json
 
 [Incubating] Problems report is available at: file:///home/runner/work/XVPN-Android/XVPN-Android/build/reports/problems/problems-report.html
 
@@ -117,5 +117,5 @@ You can use '--warning-mode all' to show the individual deprecation warnings and
 
 For more on this, please refer to https://docs.gradle.org/8.13/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
 
-BUILD SUCCESSFUL in 1m 18s
+BUILD SUCCESSFUL in 1m 17s
 61 actionable tasks: 60 executed, 1 up-to-date
