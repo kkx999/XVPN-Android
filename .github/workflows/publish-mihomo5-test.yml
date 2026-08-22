@@ -1,0 +1,80 @@
+name: Publish Mihomo5 Test
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ci/publish-mihomo5-test.txt
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    env:
+      BUILD_RUN_ID: '32574575313'
+      SOURCE_SHA: 'aa8fdbbb2155cb665a24b33bc701b6dcedadbfde'
+      ARTIFACT_NAME: 'XVPN-v1.1.1-mihomo5'
+      TAG: 'v1.1.1-mihomo5-test'
+      OLD_TAG: 'v1.1.1-mihomo4-test'
+    steps:
+      - name: Download verified artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh run download "$BUILD_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$ARTIFACT_NAME" --dir dist
+          test -f dist/XVPN-v1.1.1-mihomo5.apk
+          test -f dist/SHA256SUMS.txt
+          (cd dist && sha256sum -c SHA256SUMS.txt)
+
+      - name: Replace previous test release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true
+          gh release delete "$OLD_TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$SOURCE_SHA" \
+            --title 'XVPN v1.1.1-mihomo5 · 测试版' \
+            --notes 'Mihomo/Clash Meta 测试版。保持已通过真机验证的智能分流、全局代理、DNS 与真实 IP 防泄漏配置不变；节点抽屉改为按当前展开内容自适应高度，内容少时不再留下大块空白，展开更多国家时逐步拉高，超过屏幕 84% 后继续内部滚动；出口 IP 图标改为与 XVPN 冰蓝紫玻璃主题一致的渐变定位/网络出口图标。' \
+            --prerelease \
+            dist/XVPN-v1.1.1-mihomo5.apk \
+            dist/SHA256SUMS.txt
+
+      - name: Verify release and clean failed runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          DATA="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json tagName,isDraft,isPrerelease,targetCommitish,assets,url)"
+          echo "$DATA" | jq -e '.tagName == "v1.1.1-mihomo5-test" and .isDraft == false and .isPrerelease == true' >/dev/null
+          echo "$DATA" | jq -e '[.assets[].name] | index("XVPN-v1.1.1-mihomo5.apk") != null and index("SHA256SUMS.txt") != null' >/dev/null
+          test "$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq '.object.sha')" = "$SOURCE_SHA"
+          if gh release view "$OLD_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo 'Old Mihomo4 test release still exists'
+            exit 1
+          fi
+          FAILED_IDS="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs?status=completed&per_page=100" --jq '.workflow_runs[] | select(.conclusion=="failure") | .id' | sort -u)"
+          DELETED=0
+          for id in $FAILED_IDS; do
+            if [ "$id" = "$GITHUB_RUN_ID" ]; then continue; fi
+            gh api --method DELETE "repos/${GITHUB_REPOSITORY}/actions/runs/${id}" >/dev/null 2>&1 || true
+            DELETED=$((DELETED+1))
+          done
+          URL="$(echo "$DATA" | jq -r '.url')"
+          BODY="run_id=${GITHUB_RUN_ID}\nbuild_run_id=${BUILD_RUN_ID}\nsource_sha=${SOURCE_SHA}\nrelease=success\nprerelease=true\nold_mihomo4_removed=true\ndeleted_failed_runs=${DELETED}\ntag=${TAG}\nurl=${URL}\nupdated_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)\n"
+          CONTENT="$(printf '%b' "$BODY" | base64 -w0)"
+          API="repos/${GITHUB_REPOSITORY}/contents/ci/mihomo5-release-status.txt"
+          SHA="$(gh api "$API?ref=main" --jq '.sha' 2>/dev/null || true)"
+          if [ -n "$SHA" ]; then
+            gh api --method PUT "$API" -f message='chore: record Mihomo5 release [skip ci]' -f content="$CONTENT" -f branch=main -f sha="$SHA" >/dev/null
+          else
+            gh api --method PUT "$API" -f message='chore: record Mihomo5 release [skip ci]' -f content="$CONTENT" -f branch=main >/dev/null
+          fi
