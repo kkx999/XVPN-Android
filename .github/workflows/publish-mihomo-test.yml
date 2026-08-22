@@ -23,11 +23,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          gh run download 32541717027 \
+          gh run download 32544173639 \
             --repo "$GITHUB_REPOSITORY" \
-            --name 'XVPN-v1.1.1-mihomo1' \
+            --name 'XVPN-v1.1.1-mihomo2' \
             --dir dist
-          test -f 'dist/XVPN-v1.1.1-mihomo1.apk'
+          test -f 'dist/XVPN-v1.1.1-mihomo2.apk'
           test -f 'dist/SHA256SUMS.txt'
           (cd dist && sha256sum -c SHA256SUMS.txt)
 
@@ -37,30 +37,36 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          TAG='v1.1.1-mihomo1-test'
-          TITLE='XVPN v1.1.1-mihomo1 · 测试版'
+          TAG='v1.1.1-mihomo2-test'
+          TITLE='XVPN v1.1.1-mihomo2 · 测试版'
           cat > release-notes.md <<'EOF'
           ## ⚠️ 测试版 / Pre-release
 
-          这是 XVPN Android 切换到 **Mihomo / Clash Meta 内核**后的第一版测试包，不是正式稳定版。
+          这是 XVPN Android 切换到 **Mihomo / Clash Meta 内核**后的第二版测试包，不是正式稳定版。
 
-          **版本：** 1.1.1-mihomo1  
+          **版本：** 1.1.1-mihomo2  
           **内核：** Mihomo / Clash Meta  
           **架构：** arm64-v8a
 
-          本版本主要用于真机验证：
-          - VPN 是否可以正常连接和断开
+          ### 本次修复
+          - 修复 Mihomo `config.yaml` 的 YAML 转义兼容问题
+          - 不再把 JSON 文本直接作为 YAML 配置使用
+          - 新增安全 YAML 序列化，正确处理反斜杠、引号、路径和特殊字符
+          - 新增 YAML 特殊字符回归测试
+
+          ### 请重点测试
+          - VPN 正常连接 / 断开
           - 全局模式与智能分流
           - 节点切换
           - iplark 等出口 IP 检测
           - DNS / IPv6 泄漏
           - Panel 流量上报
 
-          APK 已通过 GitHub Actions 编译、签名、包信息和 native core 校验。请仅用于测试，确认稳定后再发布正式版本。
+          APK 已通过 GitHub Actions 单元测试、lint、签名、包信息和 Mihomo native core 校验。请仅用于测试。
           EOF
 
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/XVPN-v1.1.1-mihomo1.apk dist/SHA256SUMS.txt \
+            gh release upload "$TAG" dist/XVPN-v1.1.1-mihomo2.apk dist/SHA256SUMS.txt \
               --repo "$GITHUB_REPOSITORY" --clobber
             gh release edit "$TAG" \
               --repo "$GITHUB_REPOSITORY" \
@@ -69,10 +75,10 @@ jobs:
               --prerelease
           else
             gh release create "$TAG" \
-              dist/XVPN-v1.1.1-mihomo1.apk \
+              dist/XVPN-v1.1.1-mihomo2.apk \
               dist/SHA256SUMS.txt \
               --repo "$GITHUB_REPOSITORY" \
-              --target ad2a6b04267cdb90f24be6d4cb105666fe885a7a \
+              --target 371e09b23abf8f4e37810a8b62dde2fa7ffe7318 \
               --title "$TITLE" \
               --notes-file release-notes.md \
               --prerelease
@@ -84,20 +90,21 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          RELEASE_JSON="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/v1.1.1-mihomo1-test")"
+          RELEASE_JSON="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/v1.1.1-mihomo2-test")"
           echo "$RELEASE_JSON" | jq -e '.prerelease == true and .draft == false' >/dev/null
-          echo "$RELEASE_JSON" | jq -e '[.assets[].name] | index("XVPN-v1.1.1-mihomo1.apk") != null' >/dev/null
+          echo "$RELEASE_JSON" | jq -e '[.assets[].name] | index("XVPN-v1.1.1-mihomo2.apk") != null' >/dev/null
           echo "$RELEASE_JSON" | jq -e '[.assets[].name] | index("SHA256SUMS.txt") != null' >/dev/null
           RELEASE_URL="$(echo "$RELEASE_JSON" | jq -r '.html_url')"
           ASSET_COUNT="$(echo "$RELEASE_JSON" | jq '.assets | length')"
           STATUS=$(cat <<EOF
-          release=v1.1.1-mihomo1-test
-          title=XVPN v1.1.1-mihomo1 · 测试版
+          release=v1.1.1-mihomo2-test
+          title=XVPN v1.1.1-mihomo2 · 测试版
           prerelease=true
           draft=false
           assets=${ASSET_COUNT}
-          apk=XVPN-v1.1.1-mihomo1.apk
+          apk=XVPN-v1.1.1-mihomo2.apk
           checksum=SHA256SUMS.txt
+          source_run=32544173639
           url=${RELEASE_URL}
           published_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           EOF
