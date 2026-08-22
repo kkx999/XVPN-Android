@@ -12,7 +12,7 @@ def mihomoWrapperVersion = '0.3.1'
 def mihomoAar = file("libs/libmihomo-android-v${mihomoWrapperVersion}.aar")
 def mihomoSha = file("libs/libmihomo-android-v${mihomoWrapperVersion}.aar.sha256")
 
-tasks.register('downloadMihomo') {
+def downloadMihomo = tasks.register('downloadMihomo') {
     inputs.property('mihomoWrapperVersion', mihomoWrapperVersion)
     outputs.files(mihomoAar, mihomoSha)
     doLast {
@@ -39,8 +39,6 @@ tasks.register('downloadMihomo') {
         logger.lifecycle("Verified libmihomo-android v${mihomoWrapperVersion}: ${actual}")
     }
 }
-
-tasks.named('preBuild').configure { dependsOn tasks.named('downloadMihomo') }
 
 if (isReleaseBuild && (!releaseKeystoreFile || !releaseStorePassword || !releaseKeyAlias || !releaseKeyPassword)) {
     throw new GradleException('Release signing is not configured. Set XVPN_KEYSTORE_FILE, XVPN_KEYSTORE_PASSWORD, XVPN_KEY_ALIAS, and XVPN_KEY_PASSWORD.')
@@ -104,7 +102,7 @@ android {
 }
 
 dependencies {
-    implementation files(mihomoAar)
+    implementation files(mihomoAar).builtBy(downloadMihomo)
     implementation 'org.jetbrains.kotlin:kotlin-stdlib:2.2.10'
     testImplementation 'junit:junit:4.13.2'
     testImplementation 'org.json:json:20240303'
