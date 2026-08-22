@@ -16,6 +16,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Download verified Mihomo2 artifact
+        id: download
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -28,6 +29,7 @@ jobs:
           (cd dist && sha256sum -c SHA256SUMS.txt)
 
       - name: Publish pre-release
+        id: publish
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -58,15 +60,22 @@ jobs:
 
           此 APK 已通过 GitHub Actions 单元测试、lint、签名、包信息及 Mihomo native core 校验。
           EOF
-          gh release create "$TAG" \
-            dist/XVPN-v1.1.1-mihomo2.apk dist/SHA256SUMS.txt \
-            --repo "$GITHUB_REPOSITORY" \
-            --target 371e09b23abf8f4e37810a8b62dde2fa7ffe7318 \
-            --title 'XVPN v1.1.1-mihomo2 · 测试版' \
-            --notes-file release-notes.md \
-            --prerelease
 
-      - name: Verify and record receipt
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/XVPN-v1.1.1-mihomo2.apk dist/SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --title 'XVPN v1.1.1-mihomo2 · 测试版' --notes-file release-notes.md --prerelease
+          else
+            gh release create "$TAG" \
+              dist/XVPN-v1.1.1-mihomo2.apk dist/SHA256SUMS.txt \
+              --repo "$GITHUB_REPOSITORY" \
+              --target 371e09b23abf8f4e37810a8b62dde2fa7ffe7318 \
+              --title 'XVPN v1.1.1-mihomo2 · 测试版' \
+              --notes-file release-notes.md \
+              --prerelease
+          fi
+
+      - name: Verify release
+        id: verify
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -76,20 +85,33 @@ jobs:
           echo "$JSON" | jq -e '.prerelease == true and .draft == false' >/dev/null
           echo "$JSON" | jq -e '[.assets[].name] | index("XVPN-v1.1.1-mihomo2.apk") != null' >/dev/null
           echo "$JSON" | jq -e '[.assets[].name] | index("SHA256SUMS.txt") != null' >/dev/null
-          URL="$(echo "$JSON" | jq -r '.html_url')"
-          mkdir -p ci
-          {
-            echo 'release=v1.1.1-mihomo2-test'
-            echo 'prerelease=true'
-            echo 'draft=false'
-            echo 'apk=XVPN-v1.1.1-mihomo2.apk'
-            echo 'checksum=SHA256SUMS.txt'
-            echo 'source_run=32544173639'
-            echo "url=$URL"
-            echo "published_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          } > ci/publish-mihomo2-test-main-status.txt
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -- ci/publish-mihomo2-test-main-status.txt
-          git commit -m 'chore: record Mihomo2 release publish [skip ci]'
-          git push origin HEAD:main
+
+      - name: Record publisher status
+        if: ${{ always() }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DOWNLOAD_OUTCOME: ${{ steps.download.outcome }}
+          PUBLISH_OUTCOME: ${{ steps.publish.outcome }}
+          VERIFY_OUTCOME: ${{ steps.verify.outcome }}
+        run: |
+          set -euo pipefail
+          URL="$(gh release view v1.1.1-mihomo2-test --repo "$GITHUB_REPOSITORY" --json url --jq '.url' 2>/dev/null || true)"
+          STATUS=$(cat <<EOF
+          release=v1.1.1-mihomo2-test
+          download=${DOWNLOAD_OUTCOME:-not-run}
+          publish=${PUBLISH_OUTCOME:-not-run}
+          verify=${VERIFY_OUTCOME:-not-run}
+          source_run=32544173639
+          url=${URL}
+          updated_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          EOF
+          )
+          CONTENT="$(printf '%s\n' "$STATUS" | base64 -w0)"
+          API="repos/${GITHUB_REPOSITORY}/contents/ci/publish-mihomo2-test-main-status.txt"
+          EXISTING_SHA="$(gh api "$API?ref=main" --jq '.sha' 2>/dev/null || true)"
+          if [ -n "$EXISTING_SHA" ]; then
+            gh api --method PUT "$API" -f message='chore: record Mihomo2 publisher status [skip ci]' -f content="$CONTENT" -f branch='main' -f sha="$EXISTING_SHA" >/dev/null
+          else
+            gh api --method PUT "$API" -f message='chore: record Mihomo2 publisher status [skip ci]' -f content="$CONTENT" -f branch='main' >/dev/null
+          fi
