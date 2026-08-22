@@ -1,2 +1,0 @@
-version=1.1.1-mihomo4
-purpose=node-drawer-and-rapid-toggle-regression
