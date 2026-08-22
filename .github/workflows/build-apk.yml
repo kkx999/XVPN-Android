@@ -93,8 +93,12 @@ jobs:
             grep -Fq "def mihomoWrapperVersion = '0.3.1'" app/build.gradle
             grep -Fq "def mihomoCoreVersion = '1.19.28'" app/build.gradle
             grep -Fq "def mihomoRulesCommit = '669d7042b3590f4d1a664469df27fee4ddf188d6'" app/build.gradle
-            grep -Fq "versionName '1.1.1-mihomo3'" app/build.gradle
+            grep -Fq "versionName '1.1.1-mihomo4'" app/build.gradle
             grep -Fq 'BuildConfig.MIHOMO_CORE_VERSION' app/src/main/java/com/xvpn/android/MainActivity.java
+            grep -Fq 'boolean isActive() { return active; }' app/src/main/java/com/xvpn/android/SelectionDotView.java
+            grep -Fq 'resetNodePickerExpansionIfPresent' app/src/main/java/com/xvpn/android/DismissibleBottomSheetScrollView.java
+            grep -Fq 'CLICK_GUARD_MS = 700L' app/src/main/java/com/xvpn/android/ConnectOrbView.java
+            grep -Fq 'state == STOPPED && VpnCoreService.isLive()' app/src/main/java/com/xvpn/android/CoreState.java
             grep -Fq 'android:name=".MihomoRuleProvider"' app/src/main/AndroidManifest.xml
             grep -Fq 'BuildConfig.MIHOMO_GEOSITE_CN_SHA256' app/src/main/java/com/xvpn/android/MihomoRuleProvider.java
             grep -Fq 'BuildConfig.MIHOMO_GEOIP_CN_SHA256' app/src/main/java/com/xvpn/android/MihomoRuleProvider.java
