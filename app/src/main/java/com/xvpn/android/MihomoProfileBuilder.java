@@ -8,9 +8,13 @@ import java.util.Locale;
 /** Converts the existing XVPN/sing-box-shaped node profile into a Mihomo profile. */
 final class MihomoProfileBuilder {
     static final int TUN_MTU = 1400;
-    static final String CORE_LABEL = "Mihomo 1.19.28 · Clash Meta";
+    static final String CORE_LABEL = "Mihomo " + BuildConfig.MIHOMO_CORE_VERSION + " · Clash Meta";
     static final String PROXY_NAME = "XVPN-PROXY";
     static final String GROUP_NAME = "XVPN";
+    static final String CN_DOMAIN_PROVIDER = "XVPN-CN-DOMAIN";
+    static final String CN_IP_PROVIDER = "XVPN-CN-IP";
+    static final String CN_DOMAIN_RULE_PATH = "./rules/geosite-cn.mrs";
+    static final String CN_IP_RULE_PATH = "./rules/geoip-cn.mrs";
 
     private MihomoProfileBuilder() {}
 
@@ -21,6 +25,7 @@ final class MihomoProfileBuilder {
         JSONObject source = new JSONObject(sourceConfig);
         JSONObject outbound = findProxyOutbound(source);
         JSONObject proxy = convertProxy(outbound);
+        boolean global = RouteMode.GLOBAL.label.equals(routeLabel);
 
         JSONObject profile = new JSONObject()
                 .put("mode", "rule")
@@ -35,8 +40,10 @@ final class MihomoProfileBuilder {
                         .put("name", GROUP_NAME)
                         .put("type", "select")
                         .put("proxies", new JSONArray().put(PROXY_NAME))))
-                .put("dns", buildDns())
-                .put("rules", buildRules(RouteMode.GLOBAL.label.equals(routeLabel)));
+                .put("dns", buildDns());
+
+        if (!global) profile.put("rule-providers", buildRuleProviders());
+        profile.put("rules", buildRules(global));
 
         // Do not save JSONObject.toString() as config.yaml. JSON is only a
         // subset of YAML until JSON-only escaping (for example \/) appears.
@@ -223,6 +230,20 @@ final class MihomoProfileBuilder {
                         .put("https://8.8.8.8/dns-query"));
     }
 
+    private static JSONObject buildRuleProviders() throws Exception {
+        return new JSONObject()
+                .put(CN_DOMAIN_PROVIDER, new JSONObject()
+                        .put("type", "file")
+                        .put("behavior", "domain")
+                        .put("format", "mrs")
+                        .put("path", CN_DOMAIN_RULE_PATH))
+                .put(CN_IP_PROVIDER, new JSONObject()
+                        .put("type", "file")
+                        .put("behavior", "ipcidr")
+                        .put("format", "mrs")
+                        .put("path", CN_IP_RULE_PATH));
+    }
+
     private static JSONArray buildRules(boolean global) {
         JSONArray rules = new JSONArray()
                 .put("IP-CIDR,127.0.0.0/8,DIRECT,no-resolve")
@@ -233,7 +254,13 @@ final class MihomoProfileBuilder {
                 .put("IP-CIDR6,::1/128,DIRECT,no-resolve")
                 .put("IP-CIDR6,fc00::/7,DIRECT,no-resolve")
                 .put("IP-CIDR6,fe80::/10,DIRECT,no-resolve");
-        if (!global) rules.put("DOMAIN-SUFFIX,cn,DIRECT");
+        if (!global) {
+            // Domain classification first preserves fake-IP routing, then the
+            // CN CIDR provider catches direct-IP traffic and unresolved hosts.
+            rules.put("DOMAIN-SUFFIX,cn,DIRECT");
+            rules.put("RULE-SET," + CN_DOMAIN_PROVIDER + ",DIRECT");
+            rules.put("RULE-SET," + CN_IP_PROVIDER + ",DIRECT,no-resolve");
+        }
         rules.put("MATCH," + GROUP_NAME);
         return rules;
     }
