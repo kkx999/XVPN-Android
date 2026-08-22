@@ -1,11 +1,11 @@
-run_id=32573446678
-run_url=https://github.com/kkx999/XVPN-Android/actions/runs/32573446678
-source_commit=00461f143896656a9997b07281d008cd9d855098
+run_id=32573537263
+run_url=https://github.com/kkx999/XVPN-Android/actions/runs/32573537263
+source_commit=ab67da78c1f4714ec85adb8cb1018c6515577639
 build=success
 verify=success
 prepare=success
 upload=success
-updated_utc=2026-08-22T12:38:15Z
+updated_utc=2026-08-22T12:40:13Z
 --- build-log-tail ---
 
 Welcome to Gradle 8.13!
@@ -48,9 +48,9 @@ Verified Mihomo CN geoip: a7db74faad22913bd2d193be4c33d46dddc2e0948ebff9f0fff044
 > Task :app:javaPreCompileReleaseUnitTest
 > Task :app:processReleaseJavaRes NO-SOURCE
 > Task :app:processReleaseUnitTestJavaRes NO-SOURCE
+> Task :app:processReleaseManifestForPackage
 > Task :app:extractProguardFiles
 > Task :app:mergeReleaseJniLibFolders
-> Task :app:processReleaseManifestForPackage
 > Task :app:checkReleaseDuplicateClasses
 > Task :app:mergeReleaseStartupProfile
 > Task :app:mergeReleaseArtProfile
@@ -61,6 +61,7 @@ Verified Mihomo CN geoip: a7db74faad22913bd2d193be4c33d46dddc2e0948ebff9f0fff044
 > Task :app:compressReleaseAssets
 > Task :app:mergeReleaseNativeLibs
 > Task :app:extractReleaseVersionControlInfo
+> Task :app:mergeReleaseResources
 
 > Task :app:stripReleaseDebugSymbols
 Unable to strip the following libraries, packaging them as they are: libclash.so, libmihomo-jni.so. Run with --info option to learn more.
@@ -69,45 +70,44 @@ Unable to strip the following libraries, packaging them as they are: libclash.so
 > Task :app:extractReleaseNativeSymbolTables
 > Task :app:collectReleaseDependencies
 > Task :app:mergeReleaseNativeDebugMetadata NO-SOURCE
-> Task :app:sdkReleaseDependencyData
-> Task :app:validateSigningRelease
-> Task :app:writeReleaseAppMetadata
-> Task :app:writeReleaseSigningConfigVersions
-> Task :app:desugarReleaseFileDependencies
-> Task :app:mergeReleaseResources
 > Task :app:processReleaseResources
-> Task :app:mergeExtDexRelease
+> Task :app:sdkReleaseDependencyData
+> Task :app:desugarReleaseFileDependencies
 
 > Task :app:compileReleaseJavaWithJavac
 Note: Some input files use or override a deprecated API.
 Note: Recompile with -Xlint:deprecation for details.
 
-> Task :app:bundleReleaseClassesToCompileJar
 > Task :app:bundleReleaseClassesToRuntimeJar
+> Task :app:bundleReleaseClassesToCompileJar
 > Task :app:generateReleaseLintReportModel
 > Task :app:compileReleaseUnitTestJavaWithJavac
 > Task :app:testReleaseUnitTest
 > Task :app:generateReleaseUnitTestLintModel
 > Task :app:dexBuilderRelease
+> Task :app:lintAnalyzeReleaseUnitTest
 > Task :app:mergeReleaseGlobalSynthetics
-> Task :app:mergeDexRelease
 > Task :app:generateReleaseLintVitalReportModel
-> Task :app:compileReleaseArtProfile
+> Task :app:mergeExtDexRelease
 > Task :app:optimizeReleaseResources
+> Task :app:validateSigningRelease
+> Task :app:writeReleaseAppMetadata
+> Task :app:writeReleaseSigningConfigVersions
+> Task :app:mergeDexRelease
+> Task :app:compileReleaseArtProfile
 > Task :app:lintVitalAnalyzeRelease
 > Task :app:lintVitalReportRelease SKIPPED
 > Task :app:lintVitalRelease SKIPPED
-> Task :app:lintAnalyzeReleaseUnitTest
-> Task :app:packageRelease
-> Task :app:createReleaseApkListingFileRedirect
-> Task :app:assembleRelease
 > Task :app:lintAnalyzeRelease
 
 > Task :app:lintReportRelease
 Wrote HTML report to file:///home/runner/work/XVPN-Android/XVPN-Android/app/build/reports/lint-results-release.html
 
 > Task :app:lintRelease
-gradle/actions: Writing build results to /home/runner/work/_temp/.gradle-actions/build-results/build-1787402221092.json
+> Task :app:packageRelease
+> Task :app:createReleaseApkListingFileRedirect
+> Task :app:assembleRelease
+gradle/actions: Writing build results to /home/runner/work/_temp/.gradle-actions/build-results/build-1787402342394.json
 
 [Incubating] Problems report is available at: file:///home/runner/work/XVPN-Android/XVPN-Android/build/reports/problems/problems-report.html
 
@@ -117,5 +117,5 @@ You can use '--warning-mode all' to show the individual deprecation warnings and
 
 For more on this, please refer to https://docs.gradle.org/8.13/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
 
-BUILD SUCCESSFUL in 1m 16s
+BUILD SUCCESSFUL in 1m 14s
 61 actionable tasks: 60 executed, 1 up-to-date
