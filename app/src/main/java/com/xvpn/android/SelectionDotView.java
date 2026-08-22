@@ -42,6 +42,8 @@ final class SelectionDotView extends View {
         }).start();
     }
 
+    boolean isActive() { return active; }
+
     @Override protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
         float cx = getWidth() / 2f;
