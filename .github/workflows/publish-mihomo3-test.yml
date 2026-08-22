@@ -31,7 +31,7 @@ jobs:
           test -f dist/XVPN-v1.1.1-mihomo3.apk
           test -f dist/SHA256SUMS.txt
           (cd dist && sha256sum -c SHA256SUMS.txt)
-          RUN_HEAD="$(gh api "repos/${REPO}/actions/runs/${RUN_ID}" --jq '.head_branch + " " + .conclusion)"
+          RUN_HEAD="$(gh api "repos/${REPO}/actions/runs/${RUN_ID}" --jq '.head_branch + " " + .conclusion')"
           test "$RUN_HEAD" = 'dev/mihomo-core-v1 success'
           echo "artifact verified: $(stat -c %s dist/XVPN-v1.1.1-mihomo3.apk) bytes"
 
