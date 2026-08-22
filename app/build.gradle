@@ -106,8 +106,8 @@ android {
         applicationId 'com.xvpn.android'
         minSdk 26
         targetSdk 36
-        versionCode 10104
-        versionName '1.1.1-mihomo3'
+        versionCode 10105
+        versionName '1.1.1-mihomo4'
         manifestPlaceholders = [usesCleartextTraffic: 'true']
         buildConfigField 'String', 'MIHOMO_CORE_VERSION', "\"${mihomoCoreVersion}\""
         buildConfigField 'String', 'MIHOMO_RULE_SOURCE_COMMIT', "\"${mihomoRulesCommit}\""
