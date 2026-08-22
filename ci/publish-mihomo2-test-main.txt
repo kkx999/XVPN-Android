@@ -1,4 +1,4 @@
 release=v1.1.1-mihomo2-test
 source_run=32544173639
-requested_utc=2026-08-22T01:51:00Z
-retry=3
+requested_utc=2026-08-22T01:53:00Z
+retry=4
