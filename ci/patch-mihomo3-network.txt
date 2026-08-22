@@ -1,3 +1,0 @@
-requested_utc=2026-08-22T11:58:00Z
-version=1.1.1-mihomo3
-scope=dns-hijack-network-switching
