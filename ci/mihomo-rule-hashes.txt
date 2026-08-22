@@ -1,7 +1,0 @@
-source=MetaCubeX/meta-rules-dat
-commit=669d7042b3590f4d1a664469df27fee4ddf188d6
-geosite_cn_sha256=a7368abc76702b0a7886d00054815df2fc0a1662239c916f1c4239c25e1af085
-geosite_cn_size=540549
-geoip_cn_sha256=a7db74faad22913bd2d193be4c33d46dddc2e0948ebff9f0fff044bb6416a734
-geoip_cn_size=24765
-verified_utc=2026-08-22T11:08:54Z
