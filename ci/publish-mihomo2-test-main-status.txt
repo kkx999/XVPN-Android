@@ -1,0 +1,7 @@
+release=v1.1.1-mihomo2-test
+download=success
+publish=failure
+verify=skipped
+source_run=32544173639
+url=
+updated_utc=2026-08-22T01:49:20Z
