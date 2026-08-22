@@ -57,16 +57,36 @@ final class MihomoProfileBuilder {
         for (int i = 0; i < outbounds.length(); i++) {
             JSONObject item = outbounds.optJSONObject(i);
             if (item == null) continue;
-            String type = item.optString("type", "").toLowerCase(Locale.ROOT);
-            if (!"direct".equals(type) && !"block".equals(type) && !type.isEmpty()) return item;
+            String type = normalizedProxyType(item.optString("type", ""));
+            if (isSupportedProxyType(type)) return item;
         }
-        throw new IllegalArgumentException("节点配置中没有可用代理");
+        throw new IllegalArgumentException("节点配置中没有 Mihomo 支持的代理 outbound");
+    }
+
+    private static boolean isSupportedProxyType(String type) {
+        switch (type) {
+            case "vless":
+            case "vmess":
+            case "trojan":
+            case "ss":
+            case "hysteria2":
+            case "tuic":
+            case "anytls":
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private static String normalizedProxyType(String type) {
+        String normalized = type == null ? "" : type.trim().toLowerCase(Locale.ROOT);
+        if ("shadowsocks".equals(normalized)) return "ss";
+        if ("hy2".equals(normalized)) return "hysteria2";
+        return normalized;
     }
 
     private static JSONObject convertProxy(JSONObject src) throws Exception {
-        String type = src.optString("type", "").toLowerCase(Locale.ROOT);
-        if ("shadowsocks".equals(type)) type = "ss";
-        if ("hy2".equals(type)) type = "hysteria2";
+        String type = normalizedProxyType(src.optString("type", ""));
 
         JSONObject out = new JSONObject()
                 .put("name", PROXY_NAME)
@@ -222,7 +242,11 @@ final class MihomoProfileBuilder {
                 .put("respect-rules", true)
                 .put("enhanced-mode", "fake-ip")
                 .put("fake-ip-range", "198.18.0.1/16")
-                .put("fake-ip-filter", new JSONArray().put("*.lan").put("*.local").put("localhost"))
+                .put("fake-ip-filter", new JSONArray()
+                        .put("*.lan")
+                        .put("*.local")
+                        .put("localhost")
+                        .put("*.home.arpa"))
                 .put("default-nameserver", new JSONArray().put("223.5.5.5").put("119.29.29.29"))
                 .put("proxy-server-nameserver", new JSONArray().put("223.5.5.5").put("119.29.29.29"))
                 .put("nameserver", new JSONArray()
@@ -246,6 +270,10 @@ final class MihomoProfileBuilder {
 
     private static JSONArray buildRules(boolean global) {
         JSONArray rules = new JSONArray()
+                .put("DOMAIN,localhost,DIRECT")
+                .put("DOMAIN-SUFFIX,local,DIRECT")
+                .put("DOMAIN-SUFFIX,lan,DIRECT")
+                .put("DOMAIN-SUFFIX,home.arpa,DIRECT")
                 .put("IP-CIDR,127.0.0.0/8,DIRECT,no-resolve")
                 .put("IP-CIDR,10.0.0.0/8,DIRECT,no-resolve")
                 .put("IP-CIDR,172.16.0.0/12,DIRECT,no-resolve")
