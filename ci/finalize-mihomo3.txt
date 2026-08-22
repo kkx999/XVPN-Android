@@ -1,0 +1,3 @@
+requested_utc=2026-08-22T11:34:00Z
+version=1.1.1-mihomo3
+scope=core-only
