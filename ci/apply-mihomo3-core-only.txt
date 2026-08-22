@@ -1,3 +1,4 @@
-requested_utc=2026-08-22T11:18:00Z
+requested_utc=2026-08-22T11:24:00Z
 version=1.1.1-mihomo3
-retry=1
+retry=2
+scope=split-routing-dns-core-version-only
