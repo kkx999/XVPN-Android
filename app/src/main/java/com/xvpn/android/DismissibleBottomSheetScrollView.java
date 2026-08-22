@@ -5,6 +5,7 @@ import android.view.MotionEvent;
 import android.view.VelocityTracker;
 import android.view.View;
 import android.view.ViewConfiguration;
+import android.view.ViewGroup;
 import android.widget.ScrollView;
 
 /** Scroll container whose top handle supports a natural pull-down dismissal. */
@@ -34,14 +35,21 @@ final class DismissibleBottomSheetScrollView extends ScrollView {
 
     void configure(View target,Runnable dismiss,ProgressListener listener){
         this.target=target;this.dismiss=dismiss;this.listener=listener;
+        // The node picker persists manual country toggles for the current open
+        // sheet, but every new picker should start with only the selected
+        // node's country expanded. Other bottom sheets have no SelectionDotView
+        // descendants and are therefore left untouched.
+        post(this::resetNodePickerExpansionIfPresent);
     }
 
     @Override public boolean onInterceptTouchEvent(MotionEvent event){
         if(event.getActionMasked()==MotionEvent.ACTION_DOWN){
             begin(event);
-            // The top strip contains only the visual handle, so taking its DOWN
-            // event cannot steal taps from sheet controls or normal scrolling.
-            return handleGesture;
+            // The dismiss gesture owns only the top handle strip. Normal rows
+            // must still deliver DOWN to ScrollView so a later MOVE can be
+            // intercepted even when the gesture started on a clickable node.
+            if(handleGesture)return true;
+            return super.onInterceptTouchEvent(event);
         }
         return super.onInterceptTouchEvent(event);
     }
@@ -97,6 +105,50 @@ final class DismissibleBottomSheetScrollView extends ScrollView {
         target.animate().translationY(0f).alpha(1f).scaleX(1f).scaleY(1f).setDuration(260)
                 .setInterpolator(new android.view.animation.OvershootInterpolator(.42f)).start();
         if(listener!=null)listener.onProgress(0f);
+    }
+
+    private void resetNodePickerExpansionIfPresent(){
+        if(!(target instanceof ViewGroup))return;
+        ViewGroup sheet=(ViewGroup)target;
+        for(int i=0;i<sheet.getChildCount();i++){
+            View candidate=sheet.getChildAt(i);
+            if(!(candidate instanceof ViewGroup))continue;
+            ViewGroup block=(ViewGroup)candidate;
+            if(block.getChildCount()<2)continue;
+            View body=block.getChildAt(1);
+            if(!(body instanceof ViewGroup)||!containsSelectionMarker(body))continue;
+            boolean selected=containsActiveSelection(body);
+            body.setVisibility(selected?View.VISIBLE:View.GONE);
+            ChevronView chevron=findChevron(block.getChildAt(0));
+            if(chevron!=null)chevron.setExpanded(selected);
+        }
+    }
+
+    private boolean containsSelectionMarker(View view){
+        if(view instanceof SelectionDotView)return true;
+        if(!(view instanceof ViewGroup))return false;
+        ViewGroup group=(ViewGroup)view;
+        for(int i=0;i<group.getChildCount();i++)if(containsSelectionMarker(group.getChildAt(i)))return true;
+        return false;
+    }
+
+    private boolean containsActiveSelection(View view){
+        if(view instanceof SelectionDotView)return ((SelectionDotView)view).isActive();
+        if(!(view instanceof ViewGroup))return false;
+        ViewGroup group=(ViewGroup)view;
+        for(int i=0;i<group.getChildCount();i++)if(containsActiveSelection(group.getChildAt(i)))return true;
+        return false;
+    }
+
+    private ChevronView findChevron(View view){
+        if(view instanceof ChevronView)return (ChevronView)view;
+        if(!(view instanceof ViewGroup))return null;
+        ViewGroup group=(ViewGroup)view;
+        for(int i=0;i<group.getChildCount();i++){
+            ChevronView found=findChevron(group.getChildAt(i));
+            if(found!=null)return found;
+        }
+        return null;
     }
 
     private void finishTracker(){
