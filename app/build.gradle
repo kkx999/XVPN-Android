@@ -91,7 +91,9 @@ android {
 
     packaging {
         jniLibs {
-            useLegacyPackaging = false
+            // Clash.load() intentionally verifies concrete libclash.so and
+            // libmihomo-jni.so files under applicationInfo.nativeLibraryDir.
+            useLegacyPackaging = true
         }
     }
 
