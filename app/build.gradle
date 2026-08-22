@@ -52,8 +52,8 @@ android {
         applicationId 'com.xvpn.android'
         minSdk 26
         targetSdk 36
-        versionCode 10102
-        versionName '1.1.1-mihomo1'
+        versionCode 10103
+        versionName '1.1.1-mihomo2'
         manifestPlaceholders = [usesCleartextTraffic: 'true']
         // XVPN currently publishes arm64-only APKs; the pinned Mihomo AAR also
         // contains armeabi-v7a/x86_64, which AGP strips because of this filter.
