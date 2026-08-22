@@ -34,22 +34,37 @@ public final class MihomoSmartRoutingTest {
         assertTrue(yaml.contains("MATCH,XVPN"));
     }
 
-    @Test public void globalModeDoesNotLoadCnProviders() throws Exception {
+    @Test public void smartModeUsesSplitDnsPolicy() throws Exception {
+        String yaml = MihomoProfileBuilder.build(vlessSource(), RouteMode.SMART.label);
+        assertTrue(yaml.contains("\"nameserver-policy\""));
+        assertTrue(yaml.contains("rule-set:XVPN-CN-DOMAIN"));
+        assertTrue(yaml.contains("https://dns.alidns.com/dns-query"));
+        assertTrue(yaml.contains("https://doh.pub/dns-query"));
+        assertTrue(yaml.contains("https://1.1.1.1/dns-query"));
+        assertTrue(yaml.contains("https://8.8.8.8/dns-query"));
+        assertTrue(yaml.contains("\"direct-nameserver-follow-policy\": true"));
+    }
+
+    @Test public void globalModeDoesNotLoadCnProvidersOrCnDnsPolicy() throws Exception {
         String yaml = MihomoProfileBuilder.build(vlessSource(), RouteMode.GLOBAL.label);
         assertFalse(yaml.contains("\"rule-providers\""));
         assertFalse(yaml.contains("RULE-SET,XVPN-CN-DOMAIN,DIRECT"));
         assertFalse(yaml.contains("RULE-SET,XVPN-CN-IP,DIRECT,no-resolve"));
+        assertFalse(yaml.contains("\"nameserver-policy\""));
         assertTrue(yaml.contains("MATCH,XVPN"));
     }
 
-    @Test public void localNamesRemainDirectInBothModes() throws Exception {
+    @Test public void localAndSpecialRangesRemainDirectInBothModes() throws Exception {
         String smart = MihomoProfileBuilder.build(vlessSource(), RouteMode.SMART.label);
         String global = MihomoProfileBuilder.build(vlessSource(), RouteMode.GLOBAL.label);
         for (String rule : new String[]{
                 "DOMAIN,localhost,DIRECT",
                 "DOMAIN-SUFFIX,local,DIRECT",
                 "DOMAIN-SUFFIX,lan,DIRECT",
-                "DOMAIN-SUFFIX,home.arpa,DIRECT"}) {
+                "DOMAIN-SUFFIX,home.arpa,DIRECT",
+                "IP-CIDR,100.64.0.0/10,DIRECT,no-resolve",
+                "IP-CIDR,224.0.0.0/4,DIRECT,no-resolve",
+                "IP-CIDR6,ff00::/8,DIRECT,no-resolve"}) {
             assertTrue(smart.contains(rule));
             assertTrue(global.contains(rule));
         }
