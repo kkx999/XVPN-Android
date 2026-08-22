@@ -1,8 +1,8 @@
-run_id=32570279926
-artifact=failure
-release=skipped
-old_release_cleanup=skipped
-failed_runs_cleanup=skipped
-deleted_failed_runs=0
+run_id=32570329398
+artifact=success
+release=success
+old_release_cleanup=success
+failed_runs_cleanup=success
+deleted_failed_runs=10
 tag=v1.1.1-mihomo3-test
-updated_utc=2026-08-22T11:26:29Z
+updated_utc=2026-08-22T11:27:43Z
